@@ -1,10 +1,7 @@
 """
 audio/vad.py
 ============
-VAD orchestration for the Phantom Conversational Runtime.
-
-Relocated from phantom_conversational_runtime_v22.py (M5 Runtime Core Separation).
-Original location: vad_loop() delegation path annotated [MODULE: audio.vad] in v22.
+VAD orchestration for Phantom Runtime Lite.
 
 EXPORTED API:
   VADOrchestrator — drives the VAD frame accumulation loop
@@ -24,9 +21,7 @@ _MAX_MANUAL_BUFFER_SEC = 30.0
 
 class VADOrchestrator:
     """
-    Drives the VAD frame accumulation loop for the Phantom Conversational Runtime.
-
-    Verbatim extraction of vad_loop() delegation path from v22.
+    Drives the VAD frame accumulation loop for Phantom Runtime Lite.
     """
 
     def __init__(

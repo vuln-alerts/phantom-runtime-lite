@@ -1,1 +1,1 @@
-# ui package — Phantom Conversational Runtime v1.10 M2
+# ui package — Phantom Runtime Lite

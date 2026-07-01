@@ -1,10 +1,9 @@
 """
 transcript.persistence
 ========================
-Transcript Persistence engine — Phantom Conversational Runtime.
+Transcript Persistence engine — Phantom Runtime Lite.
 
-Extracted from phantom_conversational_runtime_v22.py (M2 High-Risk Extraction).
-Original location: [MODULE: transcript.persistence] annotations in v22.
+Handles session-scoped transcript persistence to disk.
 
 Public API
 ----------
@@ -46,7 +45,7 @@ def init_session(
     Creates session_dir, derives a timestamp-based session ID, and sets the
     JSONL transcript path.  Returns True on success, False on failure.
 
-    Preserves identical filesystem behavior to the v22 inline fallback:
+    Filesystem behavior:
       - os.makedirs with exist_ok=True
       - os.path.join(session_dir, f"transcript_{stamp}.jsonl")
       - time.strftime("%Y%m%d_%H%M%S") timestamp

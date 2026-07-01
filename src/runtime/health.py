@@ -1,11 +1,7 @@
 """
 runtime/health.py
 =================
-Runtime health snapshot and formatting for the Phantom Conversational Runtime.
-
-Relocated from phantom_conversational_runtime_v22.py (M5 Runtime Core Separation).
-Original location: health_monitor() delegation path and inline fallback
-annotated [MODULE: runtime.health] in v22.
+Runtime health snapshot and formatting for Phantom Runtime Lite.
 
 EXPORTED API:
   get_runtime_health(...)      — build a health snapshot dict

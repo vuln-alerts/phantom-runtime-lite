@@ -1,13 +1,9 @@
 """
 audio.vad_buffering
 ====================
-VAD Buffering — Phantom Conversational Runtime.
+VAD Buffering — Phantom Runtime Lite.
 
-Extracted from phantom_conversational_runtime_v22.py (M2 High-Risk Extraction).
-Original location: _manual_buf_* globals and functions, _recording_active,
-_vad_force_flush_* events, _vad_inline_active flag, _TAIL_PADDING_* constants,
-and inline VAD fallback frame accumulation state annotated [MODULE: audio.vad]
-in v22.
+Owns manual-flush buffering and VAD frame accumulation state.
 
 Public API
 ----------
@@ -29,7 +25,7 @@ import numpy as np
 
 class VADBuffer:
     """
-    VAD Buffering — Phantom Conversational Runtime.
+    VAD Buffering — Phantom Runtime Lite.
 
     Single mutable owner of:
     - manual audio buffer (manual-flush mode segments)

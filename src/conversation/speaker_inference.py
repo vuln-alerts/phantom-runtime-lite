@@ -1,10 +1,7 @@
 """
 conversation.speaker_inference
 ================================
-Speaker inference engine — Phantom Conversational Runtime.
-
-Extracted from phantom_conversational_runtime_v22.py (M2 High-Risk Extraction).
-Original location: [MODULE: conversation.speaker_inference] annotations in v22.
+Speaker inference engine — Phantom Runtime Lite.
 
 Public API
 ----------

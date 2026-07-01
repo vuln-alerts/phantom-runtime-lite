@@ -1,1 +1,1 @@
-# transcript package — Phantom Conversational Runtime v1.10 M2
+# transcript package — Phantom Runtime Lite

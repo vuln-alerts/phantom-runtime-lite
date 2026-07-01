@@ -1,1 +1,1 @@
-# profiles package — Phantom Conversational Runtime v1.10 M3
+# profiles package — Phantom Runtime Lite

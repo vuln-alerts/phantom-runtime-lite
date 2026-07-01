@@ -1,47 +1,33 @@
 """
-Phantom Conversational Runtime — v22 (Meeting & Advisory Support)
-=================================================================
-Human-controlled realtime conversational runtime platform.
+Phantom Runtime Lite
+=====================
+Human-controlled realtime conversational AI agent runtime.
 
-V22 CHANGES (over v21):
+Provides real-time conversational understanding and decision support:
+transcription, speaker inference, hallucination filtering, profile
+grounding, and structured analysis of an ongoing conversation.
 
-  1. RuntimeMode enum  — INTERVIEW / MEETING / SUMMARY
-       Replaces the implicit boolean coupling between g-key and reply_worker.
-       Extensible: add new modes without touching the dispatch loop.
+RuntimeMode enum — INTERVIEW / MEETING / SUMMARY
+  Selects how captured speech is processed: live conversational assistance,
+  structured analysis of the discussion so far, or end-of-session summary
+  generation.
 
-  2. g key — Meeting Analysis mode
-       Manual-flush:  g → _manual_buf_flush() → transcript_queue → reply_worker
-                         → Whisper → (full pipeline) → generate_meeting_analysis()
-       Non-manual:    g → generate_meeting_analysis() on current transcript_log
-       G key unchanged: → generate_summary() (interview summary)
+Structured analysis output (Japanese):
+  # サマリー
+  # リスク・懸念事項
+  # 検出された質問  (with 回答候補 per question)
+  # 推奨アクション
 
-  3. generate_meeting_analysis()
-       Reads full transcript_log (entry already appended by reply_worker).
-       GPT output structure (Japanese):
-         # サマリー
-         # リスク・懸念事項
-         # 検出された質問  (with 回答候補 per question)
-         # 推奨アクション
-
-  4. Hallucination guard fix
-       is_meaningful(): removed substring matching arm.
-       Before: tl in _HALLUCINATIONS  or  any(h in tl …)
-       After:  tl in _HALLUCINATIONS
-       Root cause: "。" in _HALLUCINATIONS matched every properly-punctuated
-       Japanese sentence as a substring, silently discarding all statements.
-
-V22 PRESERVES ALL OF V21:
-  RuntimeMode.INTERVIEW = default path — all existing reply_worker behaviour
-  unchanged. Meeting mode is opt-in per keypress only.
+Core capabilities:
   manual flush, state machine, transcript persistence, health monitoring,
   VAD extraction, speaker inference, profile grounding, hallucination guard,
   keyboard controls, queue management, degradation handling, cognition pipeline
 
-PRODUCTION COMMAND:
+EXAMPLE COMMAND:
   PYTHONUNBUFFERED=1 ENABLE_TRANSCRIPT_PERSIST=1 ENABLE_HALLUCINATION_GUARD=1 \\
   ENABLE_PROFILE_GROUNDING=1 ENABLE_SPEAKER_TRACE=1 SESSION_OUTPUT_DIR=./sessions \\
   INPUT_DEVICE="外部マイク" \\
-  python3 phantom_conversational_runtime_v22.py \\
+  python3 phantom_runtime.py \\
   --profile enterprise --agent --tts none --manual-flush --cognition \\
   --threshold 120 --min-sec 0.4 --silence-sec 0.25 --max-sec 8 \\
   --history-turns 6 --english-level natural --candidates 3

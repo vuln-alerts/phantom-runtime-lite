@@ -1,1 +1,1 @@
-# compat package — Phantom Conversational Runtime v1.10 M4
+# compat package — Phantom Runtime Lite

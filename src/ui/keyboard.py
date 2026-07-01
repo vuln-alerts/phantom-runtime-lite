@@ -1,10 +1,9 @@
 """
 ui.keyboard
 ============
-Keyboard Controls — Phantom Conversational Runtime.
+Keyboard Controls — Phantom Runtime Lite.
 
-Extracted from phantom_conversational_runtime_v22.py (M2 High-Risk Extraction).
-Original location: keyboard_loop() [MODULE: ui.keyboard] annotations in v22.
+Handles keyboard shortcut dispatch for controlling the runtime interactively.
 
 Public API
 ----------

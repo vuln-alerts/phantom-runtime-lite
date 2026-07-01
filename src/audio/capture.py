@@ -1,11 +1,7 @@
 """
 audio/capture.py
 ================
-Audio capture for the Phantom Conversational Runtime.
-
-Relocated from phantom_conversational_runtime_v22.py (M5 Runtime Core Separation).
-Original location: record_audio() inline fallback (sd.InputStream block) in v22,
-annotated [MODULE: audio.capture].
+Audio capture for Phantom Runtime Lite.
 
 EXPORTED API:
   AudioCapture — sounddevice InputStream lifecycle and overflow management
@@ -23,7 +19,7 @@ import sounddevice as sd
 
 class AudioCapture:
     """
-    Manages a sounddevice InputStream for the Phantom Conversational Runtime.
+    Manages a sounddevice InputStream for Phantom Runtime Lite.
 
     Puts captured audio blocks into audio_queue. Tracks overflow events and
     reports them via on_overflow. Calls on_open once the stream is open.

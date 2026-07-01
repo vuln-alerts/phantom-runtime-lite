@@ -1,11 +1,7 @@
 """
 audio/devices.py
 ================
-Audio input device resolution for the Phantom Conversational Runtime.
-
-Relocated from phantom_conversational_runtime_v22.py (M5 Runtime Core Separation).
-Original location: _resolve_device_inline() and inline device-listing code
-inside record_audio() in v22.
+Audio input device resolution for Phantom Runtime Lite.
 
 EXPORTED API:
   resolve_device_id(name)         — resolve device name substring to integer ID

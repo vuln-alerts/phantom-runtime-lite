@@ -1,10 +1,7 @@
 """
 runtime/state_machine.py
 =========================
-Conversation state and runtime mode enums for the Phantom Conversational Runtime.
-
-Relocated from phantom_conversational_runtime_v22.py (M5 Runtime Core Separation).
-Original location: inline ConversationState and RuntimeMode class definitions in v22.
+Conversation state and runtime mode enums for Phantom Runtime Lite.
 
 EXPORTED API:
   ConversationState — conversation lifecycle states

@@ -1,10 +1,7 @@
 """
 conversation.hallucination_guard
 =================================
-Hallucination Guard — Phantom Conversational Runtime.
-
-Extracted from phantom_conversational_runtime_v22.py (M2 High-Risk Extraction).
-Original location: is_meaningful() [MODULE: agent.hallucination_guard] annotations in v22.
+Hallucination Guard — Phantom Runtime Lite.
 
 Public API
 ----------
@@ -84,9 +81,7 @@ def is_meaningful(
     trace_fn: Optional[Callable[[str, str], None]] = None,
 ) -> bool:
     """
-    [MODULE: conversation.hallucination_guard]
-
-    Improved noise filter for interview runtime.
+    Noise filter for interview runtime transcripts.
 
     Added guards:
       - Single-word captures ("OK", "yeah", "right") below 10 chars → False
