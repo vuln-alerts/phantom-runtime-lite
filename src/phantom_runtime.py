@@ -60,6 +60,26 @@ import sounddevice as sd
 from dotenv import load_dotenv
 from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 
+# H2A-5: Provider Interface for LLM chat completions. `openai` above remains
+# in use only for Whisper audio transcription (client.audio.transcriptions),
+# which is outside the Provider Interface's scope (chat-completion-shaped
+# models only) — see the static provider instances below for detail.
+from provider.openai_provider import OpenAIProvider
+from provider.gemini_provider import GeminiProvider
+from provider.models import (
+    Message,
+    ProviderRequest,
+    StreamCancellationReason,
+    StreamingCancellation,
+    StreamingCompletion,
+    StreamingError,
+    StreamingTextDelta,
+)
+from provider.errors import (
+    RuntimeRateLimitError,
+    RuntimeTimeoutError,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Module imports (v15 real extractions)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -317,6 +337,39 @@ if not _api_key or not _api_key.startswith("sk-"):
     sys.exit(1)
 
 client = OpenAI(api_key=_api_key, timeout=20.0)
+
+# H2A-5: static Provider Interface instances for LLM chat completions.
+# `client` above remains in use ONLY for Whisper audio transcription
+# (client.audio.transcriptions.create) — out of scope for the Provider
+# Interface, whose models are chat-completion-shaped only. Whisper
+# therefore always uses OpenAI regardless of the selected provider below
+# (intentional scope boundary — see ROADMAP_V10.md H2A notes).
+#
+# Three statically-configured instances preserve the exact timeout value
+# already used by each existing call site (Behavioral Compatibility):
+#   - _provider_default:    matches this client's own default (20.0s) —
+#                           used by every buffered call site that never
+#                           overrode the timeout.
+#   - _provider_candidates: generate_candidates() explicitly used 30.0s.
+#   - _provider_streaming:  both streaming call sites explicitly used
+#                           45.0s for stream establishment.
+# No routing, no factory — plain static construction, per H2A-5 scope.
+#
+# H1-4-5: the concrete class constructed here is now selected by
+# RuntimeConfig.provider ("openai" | "gemini"). This is a construction-site
+# branch only — no dispatch layer, no factory, no DI. When _cfg is
+# unavailable (config module failed to import), the provider defaults to
+# "openai", preserving pre-H1-4-5 behavior exactly.
+_selected_provider = _cfg.provider if _cfg is not None else "openai"
+
+if _selected_provider == "gemini":
+    _provider_default    = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=20.0)
+    _provider_candidates = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=30.0)
+    _provider_streaming  = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=45.0)
+else:
+    _provider_default    = OpenAIProvider(api_key=_api_key, model=args.gpt_model, timeout=20.0)
+    _provider_candidates = OpenAIProvider(api_key=_api_key, model=args.gpt_model, timeout=30.0)
+    _provider_streaming  = OpenAIProvider(api_key=_api_key, model=args.gpt_model, timeout=45.0)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Debug Flags
@@ -2037,55 +2090,64 @@ def generate_reply(text: str, lang: str) -> None:
 
     _trace("generate_reply/start", f"lang={lang_label} max_tok={max_tok}")
 
-    try:
-        stream = client.chat.completions.create(
-            model=args.gpt_model,
-            max_tokens=max_tok,
-            temperature=0.15,
-            stream=True,
-            timeout=45.0,   # hard timeout for stream establishment
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": user_content},
-            ],
-        )
-    except _RETRYABLE as e:
-        _trace("generate_reply/CONNECT_FAIL", str(e))
-        show_warn(f"GPT connection error: {e}")
-        return
-    except RateLimitError as e:
-        _trace("generate_reply/RATELIMIT", str(e))
-        show_warn(f"GPT rate limit: {e}")
-        return
-    except Exception as e:
-        import traceback as _tb
-        _trace("generate_reply/EXCEPTION", str(e))
-        show_err("GPT", e)
-        print("[ERROR] generate_reply unexpected:", e, flush=True)
-        _tb.print_exc()
-        return
+    # H2A-5: migrated to ProviderInterface.generate_stream(). Establishment
+    # failures now surface as the first StreamingError event rather than a
+    # raised exception; mid-stream failures surface as a later StreamingError.
+    # This distinction (is_first) reproduces the original two separate
+    # try/except blocks' control flow (establishment -> early return with no
+    # trailing trace/show_sep; mid-stream -> falls through to trace/show_sep).
+    provider_request = ProviderRequest(
+        messages=[
+            Message(role="system", content=SYSTEM_PROMPT),
+            Message(role="user", content=user_content),
+        ],
+        temperature=0.15,
+        max_tokens=max_tok,
+    )
+    stream_events = _provider_streaming.generate_stream(provider_request)
 
     line_buf   = ""
     jp_printed = False
     en_printed = False
-    stream_deadline = time.monotonic() + 30.0   # 30s max for full stream
+    stream_deadline     = time.monotonic() + 30.0   # 30s max for full stream
+    deadline_triggered  = False
+    first_event         = True
 
-    try:
-        for chunk in stream:
-            if time.monotonic() > stream_deadline:
-                _trace("generate_reply/STREAM_TIMEOUT", "30s stream deadline exceeded")
-                show_warn("GPT stream timeout — partial response displayed")
-                break
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta is None:
-                continue
-            content = delta.content
-            if not content:
-                continue
+    for event in stream_events:
+        is_first    = first_event
+        first_event = False
 
-            for ch in content:
+        if isinstance(event, StreamingError):
+            if is_first:
+                # Establishment failure — mirrors the original 3-way
+                # categorized handling (connection / rate-limit / generic).
+                if isinstance(event.cause, RuntimeTimeoutError):
+                    _trace("generate_reply/CONNECT_FAIL", event.cause.message)
+                    show_warn(f"GPT connection error: {event.cause.message}")
+                elif isinstance(event.cause, RuntimeRateLimitError):
+                    _trace("generate_reply/RATELIMIT", event.cause.message)
+                    show_warn(f"GPT rate limit: {event.cause.message}")
+                else:
+                    _trace("generate_reply/EXCEPTION", event.cause.message)
+                    show_err("GPT", event.cause)
+                    print("[ERROR] generate_reply unexpected:", event.cause, flush=True)
+                return
+            else:
+                # Mid-stream failure — mirrors the original generic handler.
+                _trace("generate_reply/STREAM_EXCEPTION", event.cause.message)
+                show_err("GPT stream", event.cause)
+                print("[ERROR] GPT stream exception:", event.cause, flush=True)
+            break
+
+        if not deadline_triggered and time.monotonic() > stream_deadline:
+            deadline_triggered = True
+            _trace("generate_reply/STREAM_TIMEOUT", "30s stream deadline exceeded")
+            show_warn("GPT stream timeout — partial response displayed")
+            stream_events.cancel(StreamCancellationReason.DEADLINE_EXCEEDED)
+            continue
+
+        if isinstance(event, StreamingTextDelta):
+            for ch in event.text:
                 line_buf += ch
                 if ch == "\n":
                     stripped = line_buf.rstrip("\n").lstrip()
@@ -2093,19 +2155,14 @@ def generate_reply(text: str, lang: str) -> None:
                     if stripped.startswith("[EN]"):   en_printed = True
                     _emit_line(stripped, jp_printed, en_printed)
                     line_buf = ""
+        elif isinstance(event, (StreamingCompletion, StreamingCancellation)):
+            break
 
-        if line_buf.strip():
-            stripped = line_buf.strip()
-            if stripped.startswith("[JP]"): jp_printed = True
-            if stripped.startswith("[EN]"): en_printed = True
-            _emit_line(stripped, jp_printed, en_printed)
-
-    except Exception as e:
-        import traceback as _tb
-        _trace("generate_reply/STREAM_EXCEPTION", str(e))
-        show_err("GPT stream", e)
-        print("[ERROR] GPT stream exception:", e, flush=True)
-        _tb.print_exc()
+    if line_buf.strip():
+        stripped = line_buf.strip()
+        if stripped.startswith("[JP]"): jp_printed = True
+        if stripped.startswith("[EN]"): en_printed = True
+        _emit_line(stripped, jp_printed, en_printed)
 
     _trace("generate_reply/done")
     show_sep()
@@ -2178,19 +2235,15 @@ def _is_question_gpt(text: str) -> bool:
     a question in disguise (e.g. indirect questions without '?').
     """
     try:
-        resp = client.chat.completions.create(
-            model=args.gpt_model,
-            max_tokens=3,
+        resp = _provider_default.generate(ProviderRequest(
+            messages=[Message(role="user", content=(
+                f"Is this a recruiter question that expects a spoken answer? "
+                f"Answer YES or NO only.\n\n\"{text}\""
+            ))],
             temperature=0.0,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"Is this a recruiter question that expects a spoken answer? "
-                    f"Answer YES or NO only.\n\n\"{text}\""
-                ),
-            }],
-        )
-        answer = (resp.choices[0].message.content or "").strip().upper()
+            max_tokens=3,
+        ))
+        answer = (resp.text or "").strip().upper()
         return answer.startswith("Y")
     except Exception:
         return False   # on failure, assume not a question (conservative)
@@ -2370,48 +2423,59 @@ def generate_agent_reply(text: str, lang: str) -> Optional[str]:
     temperature = 0.1 if hallucination_guard else 0.2
 
     debug_runtime(f"entering GPT agent  model={args.gpt_model}  msgs={len(messages)}")
-    try:
-        stream = client.chat.completions.create(
-            model=args.gpt_model,
-            max_tokens=max_tok,
-            temperature=temperature,
-            stream=True,
-            timeout=45.0,   # BUG FIX: was missing — generate_reply() has this; agent path did not
-            messages=messages,
-        )
-    except _RETRYABLE as e:
-        debug_runtime(f"GPT agent connect error: {e}")
-        show_warn(f"Agent GPT connection error: {e}")
-        return None
-    except RateLimitError as e:
-        debug_runtime(f"GPT agent rate limit: {e}")
-        show_warn(f"Agent GPT rate limit: {e}")
-        return None
-    except Exception as e:
-        debug_runtime(f"GPT agent create exception: {e}")
-        show_err("Agent GPT", e)
-        return None
+
+    # H2A-5: migrated to ProviderInterface.generate_stream(). See
+    # generate_reply() for the is_first / mid-stream distinction rationale.
+    provider_request = ProviderRequest(
+        messages=[Message(role=m["role"], content=m["content"]) for m in messages],
+        temperature=temperature,
+        max_tokens=max_tok,
+    )
+    stream_events = _provider_streaming.generate_stream(provider_request)
 
     debug_runtime("GPT agent stream established — iterating chunks")
     response_parts: list[str] = []
     agent_stream_deadline = time.monotonic() + 45.0   # BUG FIX: was missing — stream can hang indefinitely without this
-    try:
-        for chunk in stream:
-            if time.monotonic() > agent_stream_deadline:
-                debug_runtime("GPT agent stream deadline exceeded — breaking")
-                show_warn("[agent] GPT stream timeout — partial response used")
-                break
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta is None or not delta.content:
-                continue
-            response_parts.append(delta.content)
-    except Exception as e:
-        debug_runtime(f"GPT agent stream exception: {e}")
-        show_err("Agent GPT stream", e)
-        if not response_parts:
-            return None
+    deadline_triggered = False
+    first_event        = True
+    mid_stream_error    = False
+
+    for event in stream_events:
+        is_first    = first_event
+        first_event = False
+
+        if isinstance(event, StreamingError):
+            if is_first:
+                if isinstance(event.cause, RuntimeTimeoutError):
+                    debug_runtime(f"GPT agent connect error: {event.cause.message}")
+                    show_warn(f"Agent GPT connection error: {event.cause.message}")
+                elif isinstance(event.cause, RuntimeRateLimitError):
+                    debug_runtime(f"GPT agent rate limit: {event.cause.message}")
+                    show_warn(f"Agent GPT rate limit: {event.cause.message}")
+                else:
+                    debug_runtime(f"GPT agent create exception: {event.cause.message}")
+                    show_err("Agent GPT", event.cause)
+                return None
+            else:
+                debug_runtime(f"GPT agent stream exception: {event.cause.message}")
+                show_err("Agent GPT stream", event.cause)
+                mid_stream_error = True
+            break
+
+        if not deadline_triggered and time.monotonic() > agent_stream_deadline:
+            deadline_triggered = True
+            debug_runtime("GPT agent stream deadline exceeded — breaking")
+            show_warn("[agent] GPT stream timeout — partial response used")
+            stream_events.cancel(StreamCancellationReason.DEADLINE_EXCEEDED)
+            continue
+
+        if isinstance(event, StreamingTextDelta):
+            response_parts.append(event.text)
+        elif isinstance(event, (StreamingCompletion, StreamingCancellation)):
+            break
+
+    if mid_stream_error and not response_parts:
+        return None
 
     debug_runtime(f"GPT agent completed  parts={len(response_parts)}  chars={sum(len(p) for p in response_parts)}")
 
@@ -2591,18 +2655,15 @@ def compress_conversation(
     _trace("compress/start", f"text_len={len(text)}")
 
     try:
-        resp = client.chat.completions.create(
-            model       = args.gpt_model,
-            max_tokens  = 180,
-            temperature = 0.0,
-            stream      = False,
-            timeout     = 20.0,
-            messages    = [
-                {"role": "system", "content": _COMPRESSION_PROMPT},
-                {"role": "user",   "content": context},
+        resp = _provider_default.generate(ProviderRequest(
+            messages=[
+                Message(role="system", content=_COMPRESSION_PROMPT),
+                Message(role="user", content=context),
             ],
-        )
-        raw = (resp.choices[0].message.content or "").strip()
+            temperature=0.0,
+            max_tokens=180,
+        ))
+        raw = (resp.text or "").strip()
         _trace("compress/done", f"raw_len={len(raw)}")
     except Exception as e:
         import traceback as _tb
@@ -2765,18 +2826,15 @@ def generate_candidates(
     _trace("candidates/start", f"n={n} lang={lang_label} q_len={len(question)}")
 
     try:
-        resp = client.chat.completions.create(
-            model       = args.gpt_model,
-            max_tokens  = 350 * n,
-            temperature = 0.15,
-            stream      = False,
-            timeout     = 30.0,
-            messages    = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user",   "content": user_content},
+        resp = _provider_candidates.generate(ProviderRequest(
+            messages=[
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=user_content),
             ],
-        )
-        raw = (resp.choices[0].message.content or "").strip()
+            temperature=0.15,
+            max_tokens=350 * n,
+        ))
+        raw = (resp.text or "").strip()
         _trace("candidates/done", f"raw_len={len(raw)}")
     except Exception as e:
         import traceback as _tb
@@ -8816,16 +8874,15 @@ def generate_summary() -> None:
     )
 
     try:
-        resp = client.chat.completions.create(
-            model=args.gpt_model,
-            max_tokens=500,
-            temperature=0.2,
+        resp = _provider_default.generate(ProviderRequest(
             messages=[
-                {"role": "system", "content": SUMMARY_PROMPT},
-                {"role": "user",   "content": merged},
+                Message(role="system", content=SUMMARY_PROMPT),
+                Message(role="user", content=merged),
             ],
-        )
-        summary = resp.choices[0].message.content.strip()
+            temperature=0.2,
+            max_tokens=500,
+        ))
+        summary = resp.text.strip()
         show_sep()
         _print(f"{BOLD}【まとめ】{RESET}\n{summary}")
         show_sep()
@@ -8929,16 +8986,15 @@ def generate_meeting_analysis() -> None:
         user_content = lines
 
     try:
-        resp = client.chat.completions.create(
-            model=args.gpt_model,
-            max_tokens=1500,
-            temperature=0.2,
+        resp = _provider_default.generate(ProviderRequest(
             messages=[
-                {"role": "system", "content": _MEETING_ANALYSIS_PROMPT},
-                {"role": "user",   "content": user_content},
+                Message(role="system", content=_MEETING_ANALYSIS_PROMPT),
+                Message(role="user", content=user_content),
             ],
-        )
-        result = resp.choices[0].message.content.strip()
+            temperature=0.2,
+            max_tokens=1500,
+        ))
+        result = resp.text.strip()
         show_sep()
         _print(f"{BOLD}【ミーティング分析】{RESET}\n{result}")
         show_sep()
