@@ -59,4 +59,7 @@ HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
 # Default args use built-in light prompts; overridable at run/compose time.
 # runtime.cloud_run_shell (v1.11 H2) spawns phantom_runtime.py
 # as an unmodified child process and forwards all args after "--" to it verbatim.
-CMD ["python", "-m", "runtime.cloud_run_shell", "--", "--profile", "default", "--mode", "light", "--no-color"]
+# --audio-source fd: Cloud Run has no microphone hardware — audio arrives from
+# a remote Phantom Client via the Shell's transport gateway (see
+# runtime.transport_gateway / runtime.cloud_run_shell) instead of sounddevice.
+CMD ["python", "-m", "runtime.cloud_run_shell", "--", "--profile", "default", "--mode", "light", "--no-color", "--audio-source", "fd"]

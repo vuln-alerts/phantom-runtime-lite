@@ -16,3 +16,4 @@ htmlcov/
 debug_audio/
 sessions/
 logs/
+src/memory/

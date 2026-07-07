@@ -246,6 +246,10 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--input-device", default="",
                    help="Input device name substring (e.g. '外部マイク', 'BlackHole'). "
                         "Also reads INPUT_DEVICE env var. Empty = system default.")
+    p.add_argument("--audio-source", default="mic", choices=["mic", "fd"],
+                   help="Audio input source: 'mic'=local sounddevice capture (default); "
+                        "'fd'=read raw PCM16LE mono audio from the PHANTOM_AUDIO_FD pipe "
+                        "handed to this process by runtime.cloud_run_shell.")
 
     # ── Manual flush mode (human-in-the-loop execution control) ──────────
     p.add_argument("--manual-flush", action="store_true",
@@ -559,6 +563,53 @@ class LogEntry(NamedTuple):
 transcript_log: deque = deque(maxlen=200)   # raised from 80: supports 30-60 min enterprise calls
 _shutdown = threading.Event()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Typed event transport (H3 client-cloud integration)
+# ─────────────────────────────────────────────────────────────────────────────
+# When this process is spawned by runtime.cloud_run_shell, PHANTOM_EVENT_FD
+# names a pipe fd the Shell relays verbatim to a connected client (see
+# runtime.transport_gateway). Every outbound event is a single JSON line
+# wrapped in a common versioned envelope so the transport layer never needs
+# to understand event-specific fields — only the payload varies by type.
+# Local/dev runs without PHANTOM_EVENT_FD set are unaffected: _emit_event
+# becomes a no-op and console output (show_*) is unchanged either way.
+_EVENT_SCHEMA_VERSION = 1
+_event_lock = threading.Lock()
+_event_file = None
+
+
+def _init_event_transport() -> None:
+    global _event_file
+    fd_str = os.getenv("PHANTOM_EVENT_FD", "").strip()
+    if not fd_str:
+        return
+    try:
+        _event_file = os.fdopen(int(fd_str), "w", buffering=1, encoding="utf-8")
+    except (ValueError, OSError) as e:
+        print(f"[warn] PHANTOM_EVENT_FD invalid ({e}) — typed events disabled",
+              file=sys.stderr)
+
+
+def _emit_event(event_type: str, **payload) -> None:
+    """Write one versioned JSON event line: {version, type, timestamp, payload}."""
+    if _event_file is None:
+        return
+    envelope = {
+        "version":   _EVENT_SCHEMA_VERSION,
+        "type":      event_type,
+        "timestamp": _datetime.datetime.now(_datetime.timezone.utc).isoformat(),
+        "payload":   payload,
+    }
+    line = _json.dumps(envelope, ensure_ascii=False)
+    try:
+        with _event_lock:
+            _event_file.write(line + "\n")
+    except (BrokenPipeError, OSError):
+        pass  # transport/client gone — console output keeps working regardless
+
+
+_init_event_transport()
+
 # ── Meeting Analysis: incremental cursor (Task 5) ─────────────────────────────
 # Tracks how many transcript_log entries have been processed by generate_meeting_analysis().
 # Updated after each analysis — next call covers only new entries since last run.
@@ -768,6 +819,7 @@ def _set_state(new_state: ConversationState) -> None:
         _conv_state = new_state
     if old != new_state:
         show_info(f"[state] {old.value} → {new_state.value}")
+        _emit_event("status", state=new_state.value, previous=old.value)
 
 
 def _get_state() -> ConversationState:
@@ -835,7 +887,9 @@ def show_en(text: str)                : _print(f"\n{GREEN}{BOLD}[EN]{RESET} {BOL
 def show_read(text: str)              : _print(f"{MAGENTA}[読]{RESET} {text}")
 def show_info(text: str)              : _print(f"{GRAY}· {text}{RESET}")
 def show_warn(text: str)              : _print(f"{YELLOW}⚠  {text}{RESET}")
-def show_err(label: str, err)         : _print(f"{RED}[{label}]{RESET} {err}")
+def show_err(label: str, err)         :
+    _print(f"{RED}[{label}]{RESET} {err}")
+    _emit_event("error", label=label, message=str(err))
 def show_delay_en(phrase: str)        : _print(f"\n{WHITE}{BOLD}[DLY]{RESET} {WHITE}{phrase}{RESET}\n")
 def show_delay_jp(phrase: str)        : _print(f"\n{YELLOW}{BOLD}[考]{RESET}  {YELLOW}{phrase}{RESET}\n")
 def show_agent_reply(text: str)       : _print(f"\n{CYAN}{BOLD}[→]{RESET} {BOLD}{text}{RESET}\n")
@@ -843,6 +897,7 @@ def show_hold(phrase: str)            : _print(f"\n{WHITE}{BOLD}[HOLD]{RESET} {W
 def show_latency(stt_ms: float, gpt_ms: float):
     total = stt_ms + gpt_ms
     _print(f"{GRAY}· STT={stt_ms:.0f}ms  GPT={gpt_ms:.0f}ms  TOTAL={total:.0f}ms{RESET}")
+    _emit_event("latency", stt_ms=stt_ms, gpt_ms=gpt_ms, total_ms=total)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Debug helpers — controlled by _DEBUG_* flags above
@@ -1145,9 +1200,17 @@ def _load_profile(name: str) -> tuple[dict[str, str], str]:
 
 
 def _extract_profile_overrides(sections: dict[str, str]) -> dict[str, str]:
-    """Parse language_behavior section for interview_lang / english_level overrides."""
+    """Parse language_behavior section for interview_lang / english_level overrides.
+
+    language_behavior may be a dict (profiles.loader/schema normalisation) or a
+    legacy str (raw ## section text) — both shapes are supported here.
+    """
+    lb = sections.get("language_behavior", "")
+    if isinstance(lb, dict):
+        return {k: v for k, v in lb.items() if k in ("interview_lang", "english_level")}
+
     overrides: dict[str, str] = {}
-    for line in sections.get("language_behavior", "").splitlines():
+    for line in lb.splitlines():
         line = line.strip()
         if ":" in line:
             key, _, val = line.partition(":")
@@ -1337,7 +1400,12 @@ def show_random_clarify() -> None:
     show_clarify(random.choice(_CLARIFY_DEFAULT))
 
 
-def _parse_phrase_list(raw: str) -> list[str]:
+def _parse_phrase_list(raw) -> list[str]:
+    """Accepts either a legacy str (raw ## section text) or a normalized list
+    (profiles.loader/schema normalisation) — both shapes are supported here."""
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw
+                if str(item).strip() and not str(item).strip().startswith("#")]
     return [ln.strip() for ln in raw.splitlines()
             if ln.strip() and not ln.strip().startswith("#")]
 
@@ -2177,11 +2245,17 @@ def _emit_line(line: str, jp_already: bool, en_already: bool) -> None:
     if not line:
         return
     if line.startswith("[JP]"):
-        show_jp(line[4:].strip())
+        text = line[4:].strip()
+        show_jp(text)
+        _emit_event("reply", lang="ja", text=text, speaker="agent")
     elif line.startswith("[EN]"):
-        show_en(line[4:].strip())
+        text = line[4:].strip()
+        show_en(text)
+        _emit_event("reply", lang="en", text=text, speaker="agent")
     elif line.startswith("[READ]"):
-        show_read(line[6:].strip())
+        text = line[6:].strip()
+        show_read(text)
+        _emit_event("reply", lang="pronunciation", text=text, speaker="agent")
     elif not jp_already and not en_already:
         _print(GRAY + line + RESET)
 
@@ -3020,6 +3094,7 @@ def reply_worker() -> None:
             entry = LogEntry(text=text, lang=lang, ts=ts, speaker=speaker)
             with _log_lock:
                 transcript_log.append(entry)
+            _emit_event("transcript", text=text, lang=lang, ts=ts, speaker=speaker)
             # Persist outside lock — safe because _persist_entry has its own write lock
             _trace("reply_worker/persisting")
             _persist_entry(entry, state=state_v, latency_ms=t_stt * 1000)
@@ -3144,6 +3219,7 @@ def reply_worker() -> None:
                 agent_entry = LogEntry(text=response, lang="english", ts=agent_ts, speaker="agent")
                 with _log_lock:
                     transcript_log.append(agent_entry)
+                _emit_event("reply", text=response, lang="en", speaker="agent", ts=agent_ts)
                 _persist_entry(
                     agent_entry,
                     state      = ConversationState.GENERATING.value,
@@ -3204,12 +3280,72 @@ def _audio_callback(indata, frames, time_info, status) -> None:
 _audio_callback._last_status = None  # type: ignore[attr-defined]
 
 
+def _record_audio_from_fd() -> None:
+    """
+    Audio-in path for Cloud Run deployments (--audio-source fd).
+
+    Reads raw PCM16LE mono audio from the PHANTOM_AUDIO_FD pipe handed to
+    this process by runtime.cloud_run_shell (relayed there from a remote
+    client's WebSocket binary frames via runtime.transport_gateway). Blocks
+    are rechunked to the exact same shape sounddevice's InputStream callback
+    produces — (BLOCK_SIZE, CHANNELS) int16 — and pushed into the same
+    audio_queue the VAD/reply_worker pipeline already consumes from. No
+    other part of the pipeline changes.
+    """
+    global _audio_overflow_count
+
+    fd_str = os.getenv("PHANTOM_AUDIO_FD", "").strip()
+    if not fd_str:
+        show_err("Audio", "PHANTOM_AUDIO_FD not set — cannot use --audio-source fd")
+        _shutdown.set()
+        return
+    try:
+        fd = int(fd_str)
+    except ValueError:
+        show_err("Audio", f"invalid PHANTOM_AUDIO_FD={fd_str!r}")
+        _shutdown.set()
+        return
+
+    show_info(f"[audio] fd-source active (fd={fd}) — awaiting client audio stream")
+    show_sep()
+
+    block_bytes = BLOCK_SIZE * CHANNELS * 2   # int16 -> 2 bytes/sample
+    buf = bytearray()
+
+    while not _shutdown.is_set():
+        try:
+            chunk = os.read(fd, 65536)
+        except OSError as e:
+            show_err("Audio", f"fd read failed: {e}")
+            break
+        if not chunk:
+            show_info("[audio] fd closed by transport — audio-in ended")
+            break
+
+        buf.extend(chunk)
+        while len(buf) >= block_bytes:
+            block = np.frombuffer(bytes(buf[:block_bytes]), dtype=np.int16).reshape(
+                BLOCK_SIZE, CHANNELS
+            )
+            del buf[:block_bytes]
+            try:
+                audio_queue.put_nowait(block.copy())
+            except queue.Full:
+                with _audio_overflow_lock:
+                    _audio_overflow_count += 1
+                    _overflow_window.append(time.monotonic())
+
+
 def record_audio() -> None:
     """
     [MODULE: audio.capture]
     v16: delegates to AudioCapture when available.
     Falls back to inline sounddevice InputStream if module not loaded.
     """
+    if args.audio_source == "fd":
+        _record_audio_from_fd()
+        return
+
     if _CAPTURE_MODULE_LOADED:
         def _on_overflow(count: int, rate: float) -> None:
             show_warn(
@@ -8995,6 +9131,7 @@ def generate_meeting_analysis() -> None:
             max_tokens=1500,
         ))
         result = resp.text.strip()
+        _emit_event("analysis", text=result)
         show_sep()
         _print(f"{BOLD}【ミーティング分析】{RESET}\n{result}")
         show_sep()

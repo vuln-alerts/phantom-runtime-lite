@@ -172,6 +172,23 @@ The public hackathon edition includes:
 
 ---
 
+## Implementation Note
+
+Verification Runtime, Trust Runtime, and Dashboard Runtime (the components
+underlying Hallucination Guard and Decision Support above) are **validated
+downstream runtime components**: the H4-10 validation exercised the full
+Cloud Run Runtime → Runtime Adapter → Verification Runtime → Trust Runtime →
+Dashboard Runtime → Event Aggregator → FastAPI chain end-to-end against real
+OpenAI and Gemini traffic, with 0 failures and 0 errors.
+
+Wiring a standing production consumer that connects to
+`runtime/transport_gateway.py`'s `/ws` stream and drives this chain
+automatically — rather than via the validation's own ad hoc scripts — is
+tracked as Future Work, not yet implemented. See
+`docs/H4_10_VALIDATION_REPORT.md` §7 Remaining Risks for full detail.
+
+---
+
 # Future Vision
 
 Phantom Runtime Lite serves as the public foundation of the broader Phantom project.
