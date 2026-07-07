@@ -94,12 +94,14 @@ class RuntimeConfig:
     profile_name:        str   = "default"
     input_device:        str   = ""        # INPUT_DEVICE env or --input-device
 
-    # ── LLM Provider selection (v1.11 H1-1) ─────────────────────────────────
-    # Configuration only — no routing logic. OpenAI remains the sole active
-    # provider until later H1 phases (Provider Interface / Runtime Routing).
-    provider:            str   = "openai"  # openai | gemini (PROVIDER env)
-    gemini_api_key:      str   = ""        # GEMINI_API_KEY env (unused until H1-2+)
-    gemini_model:        str   = "gemini-2.5-flash"  # RUNTIME_GEMINI_MODEL env (v1.11 H1-4)
+    # ── LLM Provider selection (H5-1: session-scoped, not deployment-wide) ──
+    # No `provider` field here: PROVIDER no longer participates in routing.
+    # Provider selection is session-scoped, read directly from
+    # PHANTOM_PROVIDER by phantom_runtime.py -- set fresh per spawned
+    # Runtime child by runtime.cloud_run_shell, based on the client's
+    # validated `provider` request metadata (runtime.provider_router).
+    gemini_api_key:      str   = ""        # GEMINI_API_KEY env
+    gemini_model:        str   = "gemini-2.5-flash"  # RUNTIME_GEMINI_MODEL env
 
     @classmethod
     def from_env(cls) -> "RuntimeConfig":
@@ -136,7 +138,6 @@ class RuntimeConfig:
             log_level              = _str("RUNTIME_LOG_LEVEL", "INFO"),
             log_json               = _bool("RUNTIME_LOG_JSON"),
             runtime_log_level      = _str("RUNTIME_LOG_LEVEL", "INFO"),
-            provider               = _str("PROVIDER", "openai").lower(),
             gemini_api_key         = _str("GEMINI_API_KEY", ""),
             gemini_model           = _str("RUNTIME_GEMINI_MODEL", "gemini-2.5-flash"),
         )

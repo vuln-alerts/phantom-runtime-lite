@@ -22,8 +22,16 @@ end-to-end and live-credential validation that backs this submission.
 
 ## Current Implementation
 
+The Cloud Run deployment for this submission runs the **Production WebSocket
+Runtime**: `runtime.cloud_run_shell` driving the unmodified
+`phantom_runtime.py` conversational runtime, with `runtime.transport_gateway`
+exposing `GET /healthz` (liveness) and `WS /ws` (live audio in / runtime
+events out). This is what a Cloud Run URL visitor talks to today.
+
 The following components are implemented and validated (see
-[Validation Summary](#validation-summary) below):
+[Validation Summary](#validation-summary) below) as the **H4 Extension** — an
+event-driven, translation-only pipeline that consumes the Production
+WebSocket Runtime's event stream:
 
 - Runtime Event Contract
 - Runtime Adapter
@@ -35,9 +43,13 @@ The following components are implemented and validated (see
   - `GET /health`
   - `POST /aggregate`
 
-Validation results for these components (OpenAI Live Validation, Gemini Live
-Validation, Production-like Validation, Regression) are summarized in
-[Validation Summary](#validation-summary) below.
+The H4 Extension is validated end-to-end (unit, integration, live
+OpenAI/Gemini credentials, and a production-like Docker container — see
+[Validation Summary](#validation-summary)) but is **not yet wired as a live
+consumer of the deployed Cloud Run service** — see [Future Work](#future-work)
+(Live consumer wiring). Validation results for these components (OpenAI Live
+Validation, Gemini Live Validation, Production-like Validation, Regression)
+are summarized in [Validation Summary](#validation-summary) below.
 
 ## Architecture
 
@@ -63,8 +75,10 @@ Validation, Production-like Validation, Regression) are summarized in
         Cloud Run Deployment
 ```
 
-The H4 extension adds an event-driven, translation-only pipeline downstream of
-the Cloud Run Runtime:
+The H4 Extension adds an event-driven, translation-only pipeline that has
+been implemented and validated (see
+[Validation Summary](#validation-summary)) against the Cloud Run Runtime's
+real event shape:
 
 ```text
 Cloud Run Runtime (real _emit_event shape)
@@ -76,6 +90,14 @@ Cloud Run Runtime (real _emit_event shape)
     -> FastAPI POST /aggregate
     -> JSON
 ```
+
+This pipeline is validated (unit, integration, and production-like Docker
+tests — see [Validation Summary](#validation-summary)) but does not yet run
+as a live consumer of the deployed Cloud Run service; the publicly deployed
+Cloud Run URL serves the **Production WebSocket Runtime** only (`GET
+/healthz`, `WS /ws`). Wiring this pipeline to that live `/ws` event stream is
+tracked as **Future Work: Live consumer wiring** (see
+[Future Work](#future-work)).
 
 Cloud Run Runtime, Provider, Runtime Routing, and Whisper are unchanged by
 this extension; the Runtime Event Contract is the single source of truth and
@@ -97,16 +119,21 @@ docker build -t phantom-runtime-lite .
 docker run -e OPENAI_API_KEY=sk-... -p 8080:8080 phantom-runtime-lite
 ```
 
-To use Gemini for reply generation instead of the default OpenAI provider, set
-`PROVIDER=gemini` together with `GEMINI_API_KEY`. Note that speech-to-text
-(Whisper) always uses `OPENAI_API_KEY` regardless of `PROVIDER`.
+To use Gemini for reply generation instead of the default OpenAI provider,
+connect to the Cloud Run WebSocket runtime at `/ws?provider=gemini` together
+with `GEMINI_API_KEY` set. Provider selection is request-based and
+session-scoped (H5-1): each `/ws` connection specifies `provider=openai` or
+`provider=gemini` as a mandatory query parameter, validated by the Provider
+Router (`runtime.provider_router`) before the Runtime child is spawned.
+Note that speech-to-text (Whisper) always uses `OPENAI_API_KEY` regardless
+of the session's selected provider.
 
 ## Required Environment Variables
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `OPENAI_API_KEY` | Yes | Whisper speech-to-text; default (OpenAI) reply provider |
-| `GEMINI_API_KEY` | Only if `PROVIDER=gemini` | Gemini reply provider |
+| `GEMINI_API_KEY` | Only if a session selects `provider=gemini` | Gemini reply provider |
 
 ## Validation Summary
 
@@ -124,6 +151,12 @@ Full detail: [docs/H4_10_VALIDATION_REPORT.md](docs/H4_10_VALIDATION_REPORT.md)
 | Gemini Live Validation | PASS — [docs/H4_10_GEMINI_LIVE_VALIDATION_REPORT.md](docs/H4_10_GEMINI_LIVE_VALIDATION_REPORT.md) |
 | Production-like Validation | PASS — [docs/H4_10_VALIDATION_REPORT.md](docs/H4_10_VALIDATION_REPORT.md) §4 |
 | Regression | PASS — [docs/H4_10_VALIDATION_REPORT.md](docs/H4_10_VALIDATION_REPORT.md) §5 |
+
+Note: Production-like Validation (§4 of the linked report) was performed
+against a dedicated validation image (`phantom-runtime-lite:h4-10-prodlike`),
+not the publicly deployed Cloud Run image — the deployed Cloud Run service
+currently runs the Production WebSocket Runtime only (see
+[Architecture](#architecture) and [Future Work](#future-work)).
 
 Current status overview: [docs/H4_STATUS.md](docs/H4_STATUS.md).
 

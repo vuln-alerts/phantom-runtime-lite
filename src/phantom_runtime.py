@@ -359,12 +359,16 @@ client = OpenAI(api_key=_api_key, timeout=20.0)
 #                           45.0s for stream establishment.
 # No routing, no factory — plain static construction, per H2A-5 scope.
 #
-# H1-4-5: the concrete class constructed here is now selected by
-# RuntimeConfig.provider ("openai" | "gemini"). This is a construction-site
+# H5-1: the concrete class constructed here is now selected per Runtime
+# session via PHANTOM_PROVIDER -- an env var set only on this specific
+# subprocess by runtime.cloud_run_shell's session_factory (mirrors the
+# existing PHANTOM_AUDIO_FD / PHANTOM_EVENT_FD pattern), never a
+# deployment-wide PROVIDER setting. This remains a construction-site
 # branch only — no dispatch layer, no factory, no DI. When _cfg is
 # unavailable (config module failed to import), the provider defaults to
-# "openai", preserving pre-H1-4-5 behavior exactly.
-_selected_provider = _cfg.provider if _cfg is not None else "openai"
+# "openai", preserving pre-H5-1 standalone behavior exactly.
+_requested_provider = os.getenv("PHANTOM_PROVIDER", "openai").strip().lower() or "openai"
+_selected_provider = _requested_provider if _cfg is not None else "openai"
 
 if _selected_provider == "gemini":
     _provider_default    = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=20.0)
@@ -2247,15 +2251,15 @@ def _emit_line(line: str, jp_already: bool, en_already: bool) -> None:
     if line.startswith("[JP]"):
         text = line[4:].strip()
         show_jp(text)
-        _emit_event("reply", lang="ja", text=text, speaker="agent")
+        _emit_event("reply", lang="ja", text=text, speaker="agent", provider=_selected_provider)
     elif line.startswith("[EN]"):
         text = line[4:].strip()
         show_en(text)
-        _emit_event("reply", lang="en", text=text, speaker="agent")
+        _emit_event("reply", lang="en", text=text, speaker="agent", provider=_selected_provider)
     elif line.startswith("[READ]"):
         text = line[6:].strip()
         show_read(text)
-        _emit_event("reply", lang="pronunciation", text=text, speaker="agent")
+        _emit_event("reply", lang="pronunciation", text=text, speaker="agent", provider=_selected_provider)
     elif not jp_already and not en_already:
         _print(GRAY + line + RESET)
 
@@ -3219,7 +3223,7 @@ def reply_worker() -> None:
                 agent_entry = LogEntry(text=response, lang="english", ts=agent_ts, speaker="agent")
                 with _log_lock:
                     transcript_log.append(agent_entry)
-                _emit_event("reply", text=response, lang="en", speaker="agent", ts=agent_ts)
+                _emit_event("reply", text=response, lang="en", speaker="agent", ts=agent_ts, provider=_selected_provider)
                 _persist_entry(
                     agent_entry,
                     state      = ConversationState.GENERATING.value,
