@@ -341,6 +341,7 @@ if not _api_key or not _api_key.startswith("sk-"):
     sys.exit(1)
 
 client = OpenAI(api_key=_api_key, timeout=20.0)
+print("[H5-1-DIAG] OpenAI client created", flush=True)  # [H5-1-DIAG] one-time, confirms client construction doesn't hang
 
 # H2A-5: static Provider Interface instances for LLM chat completions.
 # `client` above remains in use ONLY for Whisper audio transcription
@@ -1979,21 +1980,45 @@ def transcribe(audio: np.ndarray) -> tuple[str, str]:
     _trace("transcribe/start", f"model={args.whisper_model} fmt={fmt} audio={len(audio)/SAMPLE_RATE:.1f}s")
 
     for attempt in range(2):
+        # [H5-1-DIAG] Checkpoint A — immediately before client.audio.transcriptions.create(...)
+        print(
+            f"[H5-1-DIAG][DEBUG] Calling Speech-to-Text "
+            f"audio_size_bytes={wav_buf.getbuffer().nbytes} mime=audio/wav "
+            f"timeout=30.0 model={args.whisper_model} retry_count={attempt}",
+            flush=True,
+        )
+        _diag_t0 = time.monotonic()
         try:
-            # Per-call timeout: 30s hard limit on Whisper regardless of client default
-            result = client.audio.transcriptions.create(
-                file=wav_buf,
-                model=args.whisper_model,
-                response_format=fmt,
-                temperature=0.0,
-                timeout=30.0,
-                **extra,
-            )
+            try:
+                # Per-call timeout: 30s hard limit on Whisper regardless of client default
+                result = client.audio.transcriptions.create(
+                    file=wav_buf,
+                    model=args.whisper_model,
+                    response_format=fmt,
+                    temperature=0.0,
+                    timeout=30.0,
+                    **extra,
+                )
+            finally:
+                # [H5-1-DIAG] unconditional — fires whether the call above returned or raised,
+                # so elapsed_ms is always captured even if no exception is ever thrown.
+                print(
+                    f"[H5-1-DIAG] Speech-to-Text finished "
+                    f"elapsed_ms={(time.monotonic() - _diag_t0) * 1000:.0f}",
+                    flush=True,
+                )
+
             text = (result.text or "").strip()
             lang = (
                 (getattr(result, "language", None) or "unknown")
                 if use_verbose
                 else detect_language_from_text(text)
+            )
+            # [H5-1-DIAG] Checkpoint B — immediately after client.audio.transcriptions.create(...)
+            print(
+                f"[H5-1-DIAG][DEBUG] Speech-to-Text completed "
+                f"elapsed_ms={(time.monotonic() - _diag_t0) * 1000:.0f} transcript_len={len(text)}",
+                flush=True,
             )
             _trace("transcribe/done", f"lang={lang} text_len={len(text)} preview={text[:80]!r}")
             return text, lang
@@ -2002,6 +2027,8 @@ def transcribe(audio: np.ndarray) -> tuple[str, str]:
             if attempt == 0:
                 _trace("transcribe/retry", str(e))
                 show_warn(f"Whisper retrying… ({e})")
+                # [H5-1-DIAG] Checkpoint C — exception (retry path)
+                print(f"[H5-1-DIAG] Speech-to-Text Exception type={type(e).__name__} message={e}", flush=True)
                 wav_buf = make_wav_buffer(audio)
                 time.sleep(0.3)
             else:
@@ -2009,17 +2036,25 @@ def transcribe(audio: np.ndarray) -> tuple[str, str]:
                 show_err("Whisper", e)
                 _trace("transcribe/FAILED", str(e))
                 print("[ERROR] Whisper RETRYABLE failure:", e, flush=True)
+                # [H5-1-DIAG] Checkpoint C — exception (final failure)
+                print(f"[H5-1-DIAG] Speech-to-Text Exception type={type(e).__name__} message={e}", flush=True)
                 _tb.print_exc()
                 return "", "unknown"
         except RateLimitError as e:
+            import traceback as _tb
             show_err("Whisper rate limit", f"API quota exceeded. ({e})")
             _trace("transcribe/RATELIMIT", str(e))
+            # [H5-1-DIAG] Checkpoint C — exception
+            print(f"[H5-1-DIAG] Speech-to-Text Exception type={type(e).__name__} message={e}", flush=True)
+            _tb.print_exc()
             return "", "unknown"
         except Exception as e:
             import traceback as _tb
             show_err("Whisper", e)
             _trace("transcribe/EXCEPTION", str(e))
             print("[ERROR] Whisper unexpected exception:", e, flush=True)
+            # [H5-1-DIAG] Checkpoint C — exception
+            print(f"[H5-1-DIAG] Speech-to-Text Exception type={type(e).__name__} message={e}", flush=True)
             _tb.print_exc()
             return "", "unknown"
 
@@ -2251,14 +2286,20 @@ def _emit_line(line: str, jp_already: bool, en_already: bool) -> None:
     if line.startswith("[JP]"):
         text = line[4:].strip()
         show_jp(text)
+        # [H5-1-DIAG] Checkpoint E — immediately before _emit_event("reply")
+        print("[H5-1-DIAG] Reply Ready lang=ja", flush=True)
         _emit_event("reply", lang="ja", text=text, speaker="agent", provider=_selected_provider)
     elif line.startswith("[EN]"):
         text = line[4:].strip()
         show_en(text)
+        # [H5-1-DIAG] Checkpoint E — immediately before _emit_event("reply")
+        print("[H5-1-DIAG] Reply Ready lang=en", flush=True)
         _emit_event("reply", lang="en", text=text, speaker="agent", provider=_selected_provider)
     elif line.startswith("[READ]"):
         text = line[6:].strip()
         show_read(text)
+        # [H5-1-DIAG] Checkpoint E — immediately before _emit_event("reply")
+        print("[H5-1-DIAG] Reply Ready lang=pronunciation", flush=True)
         _emit_event("reply", lang="pronunciation", text=text, speaker="agent", provider=_selected_provider)
     elif not jp_already and not en_already:
         _print(GRAY + line + RESET)
@@ -3098,6 +3139,8 @@ def reply_worker() -> None:
             entry = LogEntry(text=text, lang=lang, ts=ts, speaker=speaker)
             with _log_lock:
                 transcript_log.append(entry)
+            # [H5-1-DIAG] Checkpoint D — immediately before _emit_event("transcript")
+            print(f"[H5-1-DIAG] Transcript Ready text_len={len(text)}", flush=True)
             _emit_event("transcript", text=text, lang=lang, ts=ts, speaker=speaker)
             # Persist outside lock — safe because _persist_entry has its own write lock
             _trace("reply_worker/persisting")
@@ -3223,6 +3266,8 @@ def reply_worker() -> None:
                 agent_entry = LogEntry(text=response, lang="english", ts=agent_ts, speaker="agent")
                 with _log_lock:
                     transcript_log.append(agent_entry)
+                # [H5-1-DIAG] Checkpoint E — immediately before _emit_event("reply")
+                print("[H5-1-DIAG] Reply Ready lang=en", flush=True)
                 _emit_event("reply", text=response, lang="en", speaker="agent", ts=agent_ts, provider=_selected_provider)
                 _persist_entry(
                     agent_entry,
