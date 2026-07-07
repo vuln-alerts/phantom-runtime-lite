@@ -16,10 +16,6 @@ outbound events — and never inspects the bytes flowing through either one.
 The child decides whether to use them (via its own --audio-source flag);
 the Shell's job is only to provide the plumbing and the network boundary.
 
-Design basis: docs/V1_11_H2_CLOUD_RUN_COMPATIBILITY_CONTRACT.md,
-docs/V1_11_H2_CLOUD_RUN_IMPLEMENTATION_PLAN.md (Part I Sections 1, 4, 5;
-Part II Phases 1, 3, 4).
-
 CONSTRAINTS (do not violate):
   - Never import phantom_conversational_runtime_v22, config, or provider.*
     The Runtime child is spawned as a subprocess, never imported.

@@ -1,0 +1,7 @@
+.env
+debug_audio/
+sessions/
+logs/
+src/memory/
+__pycache__/
+.pytest_cache/

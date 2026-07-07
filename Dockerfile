@@ -51,7 +51,7 @@ RUN mkdir -p /app/sessions
 # so the checker no longer matches itself (false-positive healthy fixed).
 # Docker HEALTHCHECK is a local/Docker-only construct; Cloud Run ignores it and
 # uses the HTTP readiness endpoint served by runtime.cloud_run_shell instead
-# (v1.11 H2 Cloud Run Compatibility — see docs/V1_11_H2_CLOUD_RUN_COMPATIBILITY_CONTRACT.md).
+# (Cloud Run Compatibility Shell — see runtime/cloud_run_shell.py, runtime/health_server.py).
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
     CMD pgrep -f "[p]hantom_runtime.py" > /dev/null || exit 1
 

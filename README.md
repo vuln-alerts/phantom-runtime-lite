@@ -127,6 +127,19 @@ Full detail: [docs/H4_10_VALIDATION_REPORT.md](docs/H4_10_VALIDATION_REPORT.md)
 
 Current status overview: [docs/H4_STATUS.md](docs/H4_STATUS.md).
 
+## Running Tests
+
+```bash
+pytest tests/
+```
+
+When both `OPENAI_API_KEY` and `GEMINI_API_KEY` are configured, the suite
+reports 217 collected / 215 passed / 2 skipped, as in
+[Validation Summary](#validation-summary) above. Without live API keys, the
+skip count differs. See
+[docs/H4_10_VALIDATION_REPORT.md](docs/H4_10_VALIDATION_REPORT.md) §5 for
+full detail.
+
 ## Future Work
 
 The remaining implementation work is tracked in:

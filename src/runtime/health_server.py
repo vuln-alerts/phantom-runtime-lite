@@ -3,9 +3,6 @@ runtime/health_server.py
 =========================
 Cloud Run health/readiness HTTP endpoint for the Compatibility Shell.
 
-Design basis: docs/V1_11_H2_CLOUD_RUN_COMPATIBILITY_CONTRACT.md (Section 10),
-docs/V1_11_H2_CLOUD_RUN_IMPLEMENTATION_PLAN.md (Part I Section 2, Phase 2).
-
 Standard-library only (http.server) — no new dependency. This module never
 imports the Runtime, config, or provider.* — it only knows how to serve a
 readiness flag supplied by its caller (the Compatibility Shell).
