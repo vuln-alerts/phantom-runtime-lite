@@ -36,6 +36,9 @@ class ClientConfig:
     backoff_base_seconds: float
     manual_flush: bool
     tts: str
+    voice: str
+    rate: Optional[int]
+    volume: float
     list_devices: bool = False
     list_output_devices: bool = False
 
@@ -77,6 +80,9 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
     parser.add_argument("--backoff-base-seconds", type=float, default=DEFAULT_BACKOFF_BASE_SECONDS)
     parser.add_argument("--manual-flush", action="store_true", help="Match server's --manual-flush help text for the 'g' key (informational only; server decides the actual behavior)")
     parser.add_argument("--tts", default="none", choices=("none", "say", "pyttsx3"), help="Client-side TTS engine for spoken replies (Phase 3)")
+    parser.add_argument("--voice", default="Samantha", help="TTS voice name, passed to the 'say' provider (Phase 3)")
+    parser.add_argument("--rate", type=int, default=None, help="TTS speech rate (words/min); default: provider's own default (say=200, pyttsx3=175)")
+    parser.add_argument("--volume", type=float, default=1.0, help="TTS playback volume, 0.0-1.0 (Phase 3)")
     args = parser.parse_args(argv)
 
     if not (args.list_devices or args.list_output_devices):
@@ -84,6 +90,9 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
             parser.error("--url is required (unless --list-devices/--list-output-devices)")
         if not args.provider:
             parser.error("--provider is required (unless --list-devices/--list-output-devices)")
+
+    if not (0.0 <= args.volume <= 1.0):
+        parser.error(f"--volume must be between 0.0 and 1.0 (got {args.volume})")
 
     return ClientConfig(
         url=args.url or "",
@@ -97,6 +106,9 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
         backoff_base_seconds=args.backoff_base_seconds,
         manual_flush=args.manual_flush,
         tts=args.tts,
+        voice=args.voice,
+        rate=args.rate,
+        volume=args.volume,
         list_devices=args.list_devices,
         list_output_devices=args.list_output_devices,
     )

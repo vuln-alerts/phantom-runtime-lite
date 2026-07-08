@@ -10,20 +10,31 @@ _drain_event_queue) and keeps a local `transcript_log` mirror so the
 ported 'l'/'s'/'c' keyboard commands (see keyboard_bridge.py) have
 something to operate on, matching the original app's console UX.
 
+`reply` events additionally drive client-side TTS playback (Phase 3,
+see tts.py) when a real TTS provider is wired in -- the speak/wait/
+interrupt loop mirrors phantom_conversational_runtime_v22.py:3167-3184.
+
 EXPORTED API:
   LogEntry        -- (text, lang, ts, speaker) NamedTuple, shape-compatible
                       with what ui/keyboard.py's 'l' handler expects
   ANSI colors: CYAN, YELLOW, GREEN, GRAY, RESET, BOLD, WHITE
   show_info/show_warn/show_sep/show_hold/show_clarify/show_delay_en/
   show_delay_jp -- console helpers matching phantom_runtime.py's originals
-  TypedEventStore -- local mirror + renderer for the inbound event stream
+  TypedEventStore -- local mirror + renderer for the inbound event stream,
+                     now also driving TTS playback for 'reply' events
 """
 
 import datetime
 import json
 import threading
+import time
 from collections import deque
 from typing import NamedTuple, Optional
+
+from runtime_client.tts import NullTTSProvider, TTSProvider
+
+_TTS_SPEAK_DEADLINE_SECONDS = 10.0
+_TTS_POLL_INTERVAL_SECONDS = 0.05
 
 
 class LogEntry(NamedTuple):
@@ -105,13 +116,27 @@ class TypedEventStore:
     Renders every event to the console as it arrives; unknown event
     types are shown generically rather than dropped, so nothing is
     silently lost.
+
+    `reply` events additionally trigger client-side TTS playback (Phase
+    3) when `tts` is not a NullTTSProvider, replicating the SSoT's
+    reply-speaking loop (phantom_conversational_runtime_v22.py:3167-3184)
+    verbatim: speak() the reply, then poll is_speaking() until it's done,
+    a 10s deadline elapses, or `tts_interrupt_event` is set (the 's' key
+    -- see keyboard_bridge.py -- sets this same Event to interrupt).
     """
 
-    def __init__(self, maxlen: int = 200) -> None:
+    def __init__(
+        self,
+        maxlen: int = 200,
+        tts: Optional[TTSProvider] = None,
+        tts_interrupt_event: Optional[threading.Event] = None,
+    ) -> None:
         self.transcript_log: "deque[LogEntry]" = deque(maxlen=maxlen)
         self.log_lock = threading.Lock()
         self.last_status: Optional[dict] = None
         self.audio_blocks_sent = 0
+        self.tts: TTSProvider = tts if tts is not None else NullTTSProvider()
+        self.tts_interrupt_event = tts_interrupt_event if tts_interrupt_event is not None else threading.Event()
 
     def handle_line(self, line: str) -> None:
         try:
@@ -160,6 +185,25 @@ class TypedEventStore:
         with self.log_lock:
             self.transcript_log.append(LogEntry(text=text, lang=lang, ts=ts, speaker=speaker))
         show_agent_reply(text)
+        if text and not isinstance(self.tts, NullTTSProvider):
+            threading.Thread(
+                target=self._speak_reply, args=(text,), daemon=True, name="tts-reply"
+            ).start()
+
+    def _speak_reply(self, text: str) -> None:
+        self.tts_interrupt_event.clear()
+        self.tts.speak(text)
+        deadline = time.monotonic() + _TTS_SPEAK_DEADLINE_SECONDS
+        while (
+            self.tts.is_speaking()
+            and time.monotonic() < deadline
+            and not self.tts_interrupt_event.is_set()
+        ):
+            time.sleep(_TTS_POLL_INTERVAL_SECONDS)
+        if self.tts_interrupt_event.is_set():
+            self.tts.stop()
+            show_info("[TTS] interrupted by operator speech")
+        self.tts_interrupt_event.clear()
 
     def _handle_status(self, payload: dict) -> None:
         self.last_status = payload

@@ -4,8 +4,11 @@ runtime_client/keyboard_bridge.py
 Wires src/ui/keyboard.py's KeyboardController/RuntimeContext (reused
 verbatim, unmodified) into the Client. Every RuntimeContext callable is
 either a trivial local console action (the canned phrase keys, help,
-log display/clear) or a Control Event send (G/g/r) -- STT, LLM, Meeting
-Analysis, and Summary generation themselves remain entirely the
+log display/clear), a Control Event send (G/g/r), or -- since Phase 3
+-- the real client-side TTS provider (see tts.py) wired into ctx.tts /
+ctx.tts_interrupt_event so the 's' key's existing stop-TTS branch in
+keyboard.py actually stops audio instead of a no-op stub. STT, LLM,
+Meeting Analysis, and Summary generation themselves remain entirely the
 Server's responsibility; this module never performs any of them itself,
 it only triggers the existing server-side dispatch remotely (see
 runtime/transport_gateway.py's Control Event relay and
@@ -103,16 +106,6 @@ class NotifyingEvent(threading.Event):
         self._on_change(False)
 
 
-class _NullTTS:
-    """Phase 1-4 stub: TTS itself is Phase 3 scope. Always reports idle."""
-
-    def is_speaking(self) -> bool:
-        return False
-
-    def stop(self) -> None:
-        return None
-
-
 def _send_control(
     loop: asyncio.AbstractEventLoop,
     control_queue: "asyncio.Queue[str]",
@@ -141,6 +134,13 @@ def build_keyboard_thread(
     against a Client-local RuntimeContext. kb_shutdown is set by the 'q'
     key (via ctx.shutdown_event); the caller is responsible for bridging
     that into the asyncio side's stop_event (see main.py).
+
+    ctx.tts / ctx.tts_interrupt_event are read directly off `store`
+    (store.tts / store.tts_interrupt_event) rather than passed
+    separately, so the keyboard thread's 's'-key stop path and
+    typed_event.py's reply-speaking loop always share the exact same
+    TTS provider + interrupt Event instance -- pressing 's' while a
+    reply is being spoken actually interrupts it.
     """
     state_holder = {"state": ConversationState.IDLE}
 
@@ -173,8 +173,8 @@ def build_keyboard_thread(
         manual_audio_buffer=[],
         recording_active=recording_active,
         show_recording_status_fn=show_recording_status,
-        tts=_NullTTS(),
-        tts_interrupt_event=threading.Event(),
+        tts=store.tts,
+        tts_interrupt_event=store.tts_interrupt_event,
         get_state_fn=lambda: state_holder["state"],
         set_state_fn=lambda s: state_holder.__setitem__("state", s),
         idle_state=ConversationState.IDLE,

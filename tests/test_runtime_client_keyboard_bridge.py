@@ -9,7 +9,10 @@ ui.keyboard.KeyboardController/RuntimeContext into Control Events
 loop fed synthetic keystrokes, that 'G'/'g'/'r' produce exactly the
 Control Event JSON phantom_runtime.py's control_loop() is documented
 to accept (see tests/test_h6_control_event_relay.py for the transport
-side of that same contract).
+side of that same contract). Also covers Phase 3: the 's' key's
+existing (unmodified) TTS-stop branch in ui/keyboard.py, now wired to
+the real store.tts / store.tts_interrupt_event instead of the old
+Phase 1-4 _NullTTS stub.
 
 Uses unittest (stdlib), consistent with the rest of this project's test
 suite: pytest is not a dependency.
@@ -31,6 +34,25 @@ if _SRC_DIR not in sys.path:
 from runtime_client.config import parse_args
 from runtime_client.keyboard_bridge import NotifyingEvent, _send_control, build_keyboard_thread
 from runtime_client.typed_event import TypedEventStore
+
+
+class _FakeTTS:
+    """Not a NullTTSProvider -- lets tests observe ctx.tts.stop() calls
+    made by ui/keyboard.py's real (unmodified) 's' handler."""
+
+    def __init__(self, speaking=True):
+        self._speaking = speaking
+        self.stop_calls = 0
+
+    def speak(self, text):
+        self._speaking = True
+
+    def stop(self):
+        self.stop_calls += 1
+        self._speaking = False
+
+    def is_speaking(self):
+        return self._speaking
 
 
 class TestNotifyingEvent(unittest.TestCase):
@@ -75,7 +97,7 @@ class TestSendControl(unittest.TestCase):
             loop.close()
 
 
-def _run_keyboard_and_collect(commands):
+def _run_keyboard_and_collect(commands, store=None):
     """
     Runs the real KeyboardController (via build_keyboard_thread) against
     a scripted stdin, on a live background asyncio loop (so
@@ -88,7 +110,8 @@ def _run_keyboard_and_collect(commands):
     try:
         control_queue: "asyncio.Queue[str]" = asyncio.Queue(maxsize=100)
         config = parse_args(["--url", "https://xxxxx.run.app", "--provider", "openai"])
-        store = TypedEventStore()
+        if store is None:
+            store = TypedEventStore()
         kb_shutdown = threading.Event()
 
         it = iter(commands)
@@ -151,6 +174,21 @@ class TestBuildKeyboardThreadControlEvents(unittest.TestCase):
         # a Control Event.
         items, _ = _run_keyboard_and_collect(["h", "u", "d", "t", "?", "q"])
         self.assertEqual(items, [])
+
+
+class TestSKeyStopsRealStoreTTS(unittest.TestCase):
+    def test_s_key_stops_speaking_tts_via_store(self):
+        fake = _FakeTTS(speaking=True)
+        store = TypedEventStore(tts=fake)
+        _run_keyboard_and_collect(["s", "q"], store=store)
+        self.assertEqual(fake.stop_calls, 1)
+        self.assertTrue(store.tts_interrupt_event.is_set())  # keyboard.py sets it; not our job to clear
+
+    def test_s_key_is_a_no_op_when_tts_not_speaking(self):
+        fake = _FakeTTS(speaking=False)
+        store = TypedEventStore(tts=fake)
+        _run_keyboard_and_collect(["s", "q"], store=store)
+        self.assertEqual(fake.stop_calls, 0)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ import io
 import json
 import os
 import sys
+import threading
+import time
 import unittest
 from contextlib import redirect_stdout
 
@@ -26,6 +28,32 @@ if _SRC_DIR not in sys.path:
     sys.path.insert(0, _SRC_DIR)
 
 from runtime_client.typed_event import TypedEventStore
+
+
+class _FakeTTS:
+    """
+    Not a NullTTSProvider subclass -- so TypedEventStore treats it as a
+    'real' provider and spawns the reply-speaking thread. speak() fires
+    `spoken` so tests can synchronize with the background thread instead
+    of sleeping arbitrarily.
+    """
+
+    def __init__(self, speaking_after_speak=False):
+        self.spoken = threading.Event()
+        self.stopped = threading.Event()
+        self.texts = []
+        self._speaking = speaking_after_speak
+
+    def speak(self, text):
+        self.texts.append(text)
+        self.spoken.set()
+
+    def stop(self):
+        self.stopped.set()
+        self._speaking = False
+
+    def is_speaking(self):
+        return self._speaking
 
 
 def _line(event_type, payload):
@@ -131,6 +159,44 @@ class TestTypedEventStoreMalformedAndUnknown(unittest.TestCase):
             # Should not raise even though "payload" key is entirely absent.
             self.store.handle_line(json.dumps({"version": 1, "type": "status"}))
         self.assertEqual(self.store.last_status, {})
+
+
+class TestTypedEventStoreTTSOnReply(unittest.TestCase):
+    def test_default_store_has_no_op_tts_and_spawns_no_thread(self):
+        store = TypedEventStore()
+        with redirect_stdout(io.StringIO()) as buf:
+            store.handle_line(_line("reply", {"text": "hi", "lang": "en"}))
+        self.assertNotIn("[TTS]", buf.getvalue())
+
+    def test_reply_with_real_tts_calls_speak(self):
+        fake = _FakeTTS(speaking_after_speak=False)
+        store = TypedEventStore(tts=fake)
+        with redirect_stdout(io.StringIO()):
+            store.handle_line(_line("reply", {"text": "Nice to meet you", "lang": "en"}))
+            self.assertTrue(fake.spoken.wait(timeout=2), "speak() was not called in time")
+            time.sleep(0.1)  # let the (near-instant, is_speaking()==False) wait loop finish
+        self.assertEqual(fake.texts, ["Nice to meet you"])
+
+    def test_empty_reply_text_does_not_trigger_speak(self):
+        fake = _FakeTTS()
+        store = TypedEventStore(tts=fake)
+        with redirect_stdout(io.StringIO()):
+            store.handle_line(_line("reply", {"text": "", "lang": "en"}))
+        self.assertFalse(fake.spoken.is_set())
+
+    def test_s_key_style_interrupt_stops_tts_and_shows_message(self):
+        fake = _FakeTTS(speaking_after_speak=True)  # stays "speaking" until stop() clears it
+        interrupt_event = threading.Event()
+        store = TypedEventStore(tts=fake, tts_interrupt_event=interrupt_event)
+        with redirect_stdout(io.StringIO()) as buf:
+            store.handle_line(_line("reply", {"text": "long reply", "lang": "en"}))
+            self.assertTrue(fake.spoken.wait(timeout=2))
+            # Simulate the 's' key: set the shared interrupt event.
+            interrupt_event.set()
+            self.assertTrue(fake.stopped.wait(timeout=2), "stop() was not called after interrupt")
+            time.sleep(0.1)  # let show_info()+clear() run right after stop()
+        self.assertIn("[TTS] interrupted by operator speech", buf.getvalue())
+        self.assertFalse(interrupt_event.is_set())  # cleared at the end of the loop
 
 
 if __name__ == "__main__":

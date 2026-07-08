@@ -93,6 +93,9 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(config.tts, "none")
         self.assertIsNone(config.input_device)
         self.assertIsNone(config.output_device)
+        self.assertEqual(config.voice, "Samantha")
+        self.assertIsNone(config.rate)
+        self.assertEqual(config.volume, 1.0)
 
     def test_invalid_provider_choice_rejected(self):
         with self.assertRaises(SystemExit):
@@ -117,6 +120,9 @@ class TestParseArgs(unittest.TestCase):
                 "--backoff-base-seconds", "2.5",
                 "--manual-flush",
                 "--tts", "say",
+                "--voice", "Daniel",
+                "--rate", "220",
+                "--volume", "0.6",
             ]
         )
         self.assertEqual(config.input_device, "MacBook")
@@ -127,6 +133,31 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(config.backoff_base_seconds, 2.5)
         self.assertTrue(config.manual_flush)
         self.assertEqual(config.tts, "say")
+        self.assertEqual(config.voice, "Daniel")
+        self.assertEqual(config.rate, 220)
+        self.assertEqual(config.volume, 0.6)
+
+    def test_volume_above_one_rejected(self):
+        with self.assertRaises(SystemExit):
+            parse_args(
+                ["--url", "https://xxxxx.run.app", "--provider", "openai", "--volume", "1.5"]
+            )
+
+    def test_volume_below_zero_rejected(self):
+        with self.assertRaises(SystemExit):
+            parse_args(
+                ["--url", "https://xxxxx.run.app", "--provider", "openai", "--volume", "-0.1"]
+            )
+
+    def test_volume_boundary_values_accepted(self):
+        config = parse_args(
+            ["--url", "https://xxxxx.run.app", "--provider", "openai", "--volume", "0.0"]
+        )
+        self.assertEqual(config.volume, 0.0)
+        config = parse_args(
+            ["--url", "https://xxxxx.run.app", "--provider", "openai", "--volume", "1.0"]
+        )
+        self.assertEqual(config.volume, 1.0)
 
 
 if __name__ == "__main__":

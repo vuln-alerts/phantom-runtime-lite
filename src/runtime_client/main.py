@@ -4,10 +4,13 @@ runtime_client/main.py
 Entrypoint wiring for the Runtime Client.
 
 Phase 1-4 scope: mic capture -> PCM16LE -> WebSocket (Phase 1-2), Control
-Events (Phase 1-3), and now the full Keyboard UX ported from
+Events (Phase 1-3), and the full Keyboard UX ported from
 src/ui/keyboard.py (KeyboardController/RuntimeContext, reused verbatim)
-plus Typed Event parsing/rendering/local mirroring (typed_event.py). TTS
-and virtual output device routing remain Phase 3.
+plus Typed Event parsing/rendering/local mirroring (typed_event.py).
+Phase 3 adds client-side TTS playback (tts.py) and virtual/macOS output
+device selection (output_device.py) -- 'reply' Typed Events are now
+actually spoken, routed to whichever output device (built-in speaker,
+BlackHole, a Multi-Output Device, ...) --output-device selects.
 
 EXPORTED API:
   main(argv=None) -- process entrypoint
@@ -33,6 +36,8 @@ if _SRC_DIR not in sys.path:
 from runtime_client.audio_bridge import AudioBridge, resolve_input_device
 from runtime_client.config import ClientConfig, build_ws_url, parse_args
 from runtime_client.keyboard_bridge import build_keyboard_thread
+from runtime_client.output_device import print_output_devices, resolve_output_device_id
+from runtime_client.tts import build_tts_provider
 from runtime_client.typed_event import TypedEventStore, show_info, show_warn
 from runtime_client.websocket_client import RuntimeWebSocketClient
 
@@ -51,19 +56,6 @@ def _list_input_devices() -> None:
         return
     for dev in devices:
         if dev["max_input_channels"] > 0:
-            _print(f"  [{dev['index']}] {dev['name']}")
-
-
-def _list_output_devices() -> None:
-    import sounddevice as sd
-
-    try:
-        devices = sd.query_devices()
-    except Exception as exc:
-        _print(f"[runtime_client] could not query output devices: {exc}")
-        return
-    for dev in devices:
-        if dev["max_output_channels"] > 0:
             _print(f"  [{dev['index']}] {dev['name']}")
 
 
@@ -102,7 +94,25 @@ async def _amain(config: ClientConfig) -> None:
         )
         _list_input_devices()
 
-    store = TypedEventStore()
+    output_device_id = resolve_output_device_id(config.output_device)
+    if config.output_device and output_device_id is None:
+        show_warn(
+            f"output device '{config.output_device}' not found "
+            "-- using system default. Available devices:"
+        )
+        print_output_devices(_print)
+
+    tts_interrupt_event = threading.Event()
+    tts = build_tts_provider(
+        config.tts,
+        voice=config.voice,
+        rate=config.rate,
+        volume=config.volume,
+        device_id=output_device_id,
+        on_warn=show_warn,
+    )
+
+    store = TypedEventStore(tts=tts, tts_interrupt_event=tts_interrupt_event)
 
     bridge = AudioBridge(
         sample_rate=config.sample_rate,
@@ -133,6 +143,7 @@ async def _amain(config: ClientConfig) -> None:
     finally:
         watcher.cancel()
         bridge.stop()
+        tts.stop()
 
 
 def main(argv: Optional[list] = None) -> None:
@@ -145,16 +156,23 @@ def main(argv: Optional[list] = None) -> None:
 
     if config.list_output_devices:
         _print("[runtime_client] available output devices:")
-        _list_output_devices()
+        print_output_devices(_print)
         return
 
     ws_url = build_ws_url(config.url, config.provider)
+    tts_line = (
+        f"  tts:          off\n" if config.tts == "none" else
+        f"  tts:          {config.tts}  voice={config.voice}  "
+        f"rate={config.rate or '(default)'}  volume={config.volume}\n"
+        f"  output device: {config.output_device or '(system default)'}\n"
+    )
     _print(
         f"[runtime_client] Phantom Runtime Client\n"
         f"  target:       {ws_url}\n"
         f"  input device: {config.input_device or '(system default)'}\n"
         f"  sample rate:  {config.sample_rate} Hz, {config.channels}ch, "
         f"block={config.block_size} frames\n"
+        f"{tts_line}"
         f"  (Ctrl+C or 'q' to quit)\n"
     )
 
