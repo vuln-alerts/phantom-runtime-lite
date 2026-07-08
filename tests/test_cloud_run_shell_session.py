@@ -137,7 +137,7 @@ class TestSpawnSessionFailureCleanup(unittest.TestCase):
             os.pipe = real_pipe
             subprocess.Popen = real_popen
 
-        self.assertEqual(len(opened), 4)  # two pipes: audio + event
+        self.assertEqual(len(opened), 6)  # three pipes: audio + event + control
         for fd in opened:
             with self.assertRaises(OSError):
                 os.close(fd)  # already closed by the failure path

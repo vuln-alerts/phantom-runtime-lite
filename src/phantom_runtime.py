@@ -9466,6 +9466,98 @@ def keyboard_loop() -> None:
             show_warn(f"Keyboard command error ({e}) — continuing")
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Control Event loop (H6: remote keyboard-equivalent commands over Cloud Run)
+# ─────────────────────────────────────────────────────────────────────────────
+def control_loop() -> None:
+    """
+    When this process is spawned by runtime.cloud_run_shell, PHANTOM_CONTROL_FD
+    names a pipe fd that runtime.transport_gateway relays inbound WebSocket
+    text frames (Control Events) into verbatim, one JSON command per line
+    (see runtime/transport_gateway.py's inbound handler). This is a second
+    trigger path into the same dispatch already reachable from the local
+    keyboard loop's 'G'/'g'/'r' commands (see keyboard_loop() above) -- no
+    new business logic, only a remote-command entry point onto it.
+
+    Local/dev runs without PHANTOM_CONTROL_FD set are unaffected: this
+    function returns immediately and control_loop's thread exits.
+
+    Recognized commands (JSON object with a "command" key):
+      {"command": "generate_summary"}           -- same as keyboard 'G'
+      {"command": "generate_meeting_analysis"}   -- same as keyboard 'g'
+      {"command": "toggle_recording"}            -- same as keyboard 'r'
+    """
+    fd_str = os.getenv("PHANTOM_CONTROL_FD", "").strip()
+    if not fd_str:
+        return
+    try:
+        control_file = os.fdopen(int(fd_str), "r", encoding="utf-8")
+    except (ValueError, OSError) as e:
+        print(f"[warn] PHANTOM_CONTROL_FD invalid ({e}) — control events disabled",
+              file=sys.stderr)
+        return
+
+    while not _shutdown.is_set():
+        try:
+            line = control_file.readline()
+        except (OSError, ValueError):
+            break
+        if not line:
+            break  # transport gateway closed the control pipe (session ending)
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            command = _json.loads(line).get("command")
+        except (ValueError, AttributeError) as e:
+            show_warn(f"Control event: malformed command ({e}) — ignored")
+            continue
+
+        try:
+            # Same dispatch bodies as keyboard_loop()'s 'G'/'g'/'r' handling
+            # above -- this is the identical logic, triggered remotely.
+            if command == "generate_summary":
+                threading.Thread(target=generate_summary, daemon=True, name="control-summary").start()
+
+            elif command == "toggle_recording":
+                if _vad_buf.recording_active.is_set():
+                    _vad_buf.recording_active.clear()
+                    show_info("○ RECORDING OFF — audio ignored until toggled again")
+                else:
+                    _vad_buf.recording_active.set()
+                    show_info("● RECORDING ON")
+                _vad_buf.show_recording_status()
+
+            elif command == "generate_meeting_analysis":
+                if args.manual_flush:
+                    merged = _vad_buf.flush()
+                    if merged is not None:
+                        if _ENV["DEBUG_AUDIO_SAVE"]:
+                            _save_debug_audio(merged)
+                        _set_runtime_mode(RuntimeMode.MEETING)
+                        show_info(f"[meeting] {len(merged)/SAMPLE_RATE:.1f}s → Whisper → ミーティング分析…")
+                        _enqueue_latest(merged)
+                    else:
+                        show_info("[meeting] バッファ空 — 現在のログで分析中…")
+                        threading.Thread(
+                            target=generate_meeting_analysis,
+                            daemon=True,
+                            name="control-meeting-analysis",
+                        ).start()
+                else:
+                    threading.Thread(
+                        target=generate_meeting_analysis,
+                        daemon=True,
+                        name="control-meeting-analysis",
+                    ).start()
+
+            else:
+                show_warn(f"Control event: unknown command {command!r} — ignored")
+
+        except Exception as e:
+            show_warn(f"Control event error ({e}) — continuing")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Signal handler
@@ -9550,6 +9642,7 @@ def main() -> None:
         threading.Thread(target=record_audio,   daemon=True, name="audio-capture"),
         threading.Thread(target=reply_worker,   daemon=True, name="reply-worker"),
         threading.Thread(target=keyboard_loop,  daemon=True, name="keyboard"),
+        threading.Thread(target=control_loop,   daemon=True, name="control"),
         threading.Thread(target=health_monitor, daemon=True, name="health"),
     ]
     for t in threads:

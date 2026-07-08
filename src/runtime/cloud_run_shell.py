@@ -12,11 +12,14 @@ client-facing transport (health + WebSocket), via runtime.transport_gateway.
 
 The Shell remains the sole owner of: the health endpoint, the WebSocket
 endpoint, process supervision, and each Runtime child's lifecycle. For
-every accepted connection it hands the Runtime child two anonymous pipes
--- one for inbound audio, one for outbound events -- and never inspects
-the bytes flowing through either one. The child decides whether to use
-them (via its own --audio-source flag); the Shell's job is only to
-provide the plumbing and the network boundary.
+every accepted connection it hands the Runtime child three anonymous
+pipes -- one for inbound audio, one for outbound events, one for inbound
+Control Events (H6: remote keyboard-equivalent commands, e.g.
+generate_summary/generate_meeting_analysis/toggle_recording) -- and
+never inspects the bytes flowing through any of them. The child decides
+whether to use them (via its own --audio-source flag and its own
+PHANTOM_CONTROL_FD reader); the Shell's job is only to provide the
+plumbing and the network boundary.
 
 CONSTRAINTS (do not violate):
   - Never import phantom_conversational_runtime_v22, config, or provider.*
@@ -25,11 +28,11 @@ CONSTRAINTS (do not violate):
     this Shell is translated to SIGINT and delivered to the active child (if
     any), reusing the Runtime's existing KeyboardInterrupt-based graceful
     shutdown.
-  - Runtime CLI arguments are forwarded verbatim, unmodified. The two pipe
+  - Runtime CLI arguments are forwarded verbatim, unmodified. The three pipe
     fds and the session's provider are communicated to the child via
     environment variables (PHANTOM_AUDIO_FD / PHANTOM_EVENT_FD /
-    PHANTOM_PROVIDER), never by mutating argv, and never via a
-    deployment-wide PROVIDER environment variable.
+    PHANTOM_CONTROL_FD / PHANTOM_PROVIDER), never by mutating argv, and
+    never via a deployment-wide PROVIDER environment variable.
 
 EXPORTED API:
   main() — process entrypoint
@@ -90,8 +93,9 @@ class RuntimeSession:
     """
     One Runtime child, spawned for exactly one WebSocket connection
     (H5-1: session-scoped Provider Routing). Owns the Shell-side halves
-    of the two pipes handed to that child -- audio_fd_w (write audio in)
-    and event_fd_r (read events out) -- and nothing else.
+    of the three pipes handed to that child -- audio_fd_w (write audio
+    in), event_fd_r (read events out), and control_fd_w (write Control
+    Events in, H6) -- and nothing else.
 
     teardown() is idempotent: the lock+flag below ensure the actual
     SIGINT/wait/SIGKILL/fd-close sequence runs exactly once even if
@@ -102,6 +106,7 @@ class RuntimeSession:
     child: subprocess.Popen
     audio_fd_w: int
     event_fd_r: int
+    control_fd_w: int
     _lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
     _torn_down: bool = dataclasses.field(default=False, repr=False)
 
@@ -128,7 +133,7 @@ class RuntimeSession:
             except subprocess.TimeoutExpired:
                 pass  # reaped later by the OS; avoid blocking shutdown indefinitely
 
-        for fd in (self.audio_fd_w, self.event_fd_r):
+        for fd in (self.audio_fd_w, self.event_fd_r, self.control_fd_w):
             try:
                 os.close(fd)
             except OSError:
@@ -176,6 +181,8 @@ def _spawn_session(forwarded_args: list, provider: str) -> RuntimeSession:
         opened_fds += [audio_read_fd, audio_write_fd]
         event_read_fd, event_write_fd = os.pipe()
         opened_fds += [event_read_fd, event_write_fd]
+        control_read_fd, control_write_fd = os.pipe()
+        opened_fds += [control_read_fd, control_write_fd]
 
         cmd = [sys.executable, _RUNTIME_ENTRYPOINT_PATH] + forwarded_args
         env = dict(os.environ)
@@ -183,6 +190,7 @@ def _spawn_session(forwarded_args: list, provider: str) -> RuntimeSession:
             {
                 "PHANTOM_AUDIO_FD": str(audio_read_fd),
                 "PHANTOM_EVENT_FD": str(event_write_fd),
+                "PHANTOM_CONTROL_FD": str(control_read_fd),
                 "PHANTOM_PROVIDER": provider,
             }
         )
@@ -190,7 +198,7 @@ def _spawn_session(forwarded_args: list, provider: str) -> RuntimeSession:
             cmd,
             cwd=_SRC_DIR,
             env=env,
-            pass_fds=(audio_read_fd, event_write_fd),
+            pass_fds=(audio_read_fd, event_write_fd, control_read_fd),
         )
     except Exception as exc:
         if child is not None:
@@ -203,12 +211,18 @@ def _spawn_session(forwarded_args: list, provider: str) -> RuntimeSession:
             _close_fd(fd)
         raise SessionSpawnError(f"failed to spawn runtime session: {exc}") from exc
 
-    # Ownership of these two fds has passed to the child now; the Shell
-    # only keeps its own ends (audio_write_fd, event_read_fd).
+    # Ownership of these three fds has passed to the child now; the Shell
+    # only keeps its own ends (audio_write_fd, event_read_fd, control_write_fd).
     _close_fd(audio_read_fd)
     _close_fd(event_write_fd)
+    _close_fd(control_read_fd)
     _log(f"runtime session started (pid={child.pid}, provider={provider})")
-    return RuntimeSession(child=child, audio_fd_w=audio_write_fd, event_fd_r=event_read_fd)
+    return RuntimeSession(
+        child=child,
+        audio_fd_w=audio_write_fd,
+        event_fd_r=event_read_fd,
+        control_fd_w=control_write_fd,
+    )
 
 
 def _teardown_session(session: RuntimeSession) -> None:

@@ -1,0 +1,102 @@
+"""
+runtime_client/config.py
+=========================
+CLI argument parsing and connection URL construction for the Runtime
+Client.
+
+EXPORTED API:
+  ClientConfig       -- resolved configuration for one client run
+  parse_args(argv)   -- parse sys.argv (or argv) into a ClientConfig
+  build_ws_url(url, provider) -- turn a Cloud Run http(s) URL into
+                                  wss://.../ws?provider=<provider>
+"""
+
+import argparse
+from dataclasses import dataclass
+from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
+
+DEFAULT_SAMPLE_RATE = 16000
+DEFAULT_CHANNELS = 1
+DEFAULT_BLOCK_SIZE = 1600  # 100ms of audio at 16kHz mono
+DEFAULT_MAX_RECONNECT_ATTEMPTS = 3
+DEFAULT_BACKOFF_BASE_SECONDS = 1.0
+
+
+@dataclass(frozen=True)
+class ClientConfig:
+    url: str
+    provider: str
+    input_device: Optional[str]
+    output_device: Optional[str]
+    sample_rate: int
+    channels: int
+    block_size: int
+    max_reconnect_attempts: int
+    backoff_base_seconds: float
+    manual_flush: bool
+    tts: str
+    list_devices: bool = False
+    list_output_devices: bool = False
+
+
+def build_ws_url(url: str, provider: str) -> str:
+    """
+    Convert a Cloud Run base URL (http/https, with or without a path) into
+    the Runtime's WebSocket endpoint: wss://<host>/ws?provider=<provider>.
+    http:// -> ws://, https:// -> wss:// (Cloud Run only serves https, so
+    this normally yields wss://). Any existing path/query on the input is
+    discarded -- only the scheme+netloc are kept.
+    """
+    parts = urlsplit(url)
+    scheme = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}.get(parts.scheme)
+    if scheme is None or not parts.netloc:
+        raise ValueError(f"invalid --url: {url!r} (expected http(s):// or ws(s)://)")
+    return urlunsplit((scheme, parts.netloc, "/ws", f"provider={provider}", ""))
+
+
+def parse_args(argv: Optional[list] = None) -> ClientConfig:
+    parser = argparse.ArgumentParser(
+        prog="runtime_client",
+        description=(
+            "Phantom Runtime Client -- streams Mac audio input (built-in "
+            "mic, USB mic, or a virtual device such as BlackHole/Loopback "
+            "fed by Zoom/Meet/Teams/Discord) to the Cloud Run Runtime over "
+            "WebSocket, and renders the Typed Events it sends back."
+        ),
+    )
+    parser.add_argument("--url", default=None, help="Cloud Run base URL, e.g. https://xxxxx.run.app")
+    parser.add_argument("--provider", choices=("openai", "gemini"), default=None, help="Runtime provider for this session")
+    parser.add_argument("--input-device", default=None, help="Input device name (substring match) or index; default: system default input")
+    parser.add_argument("--output-device", default=None, help="Output device name (substring match) or index, for TTS playback (Phase 3); default: system default output")
+    parser.add_argument("--list-devices", action="store_true", help="List available input devices and exit")
+    parser.add_argument("--list-output-devices", action="store_true", help="List available output devices and exit")
+    parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
+    parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE, help="Frames per audio block sent per WebSocket message")
+    parser.add_argument("--max-reconnect-attempts", type=int, default=DEFAULT_MAX_RECONNECT_ATTEMPTS)
+    parser.add_argument("--backoff-base-seconds", type=float, default=DEFAULT_BACKOFF_BASE_SECONDS)
+    parser.add_argument("--manual-flush", action="store_true", help="Match server's --manual-flush help text for the 'g' key (informational only; server decides the actual behavior)")
+    parser.add_argument("--tts", default="none", choices=("none", "say", "pyttsx3"), help="Client-side TTS engine for spoken replies (Phase 3)")
+    args = parser.parse_args(argv)
+
+    if not (args.list_devices or args.list_output_devices):
+        if not args.url:
+            parser.error("--url is required (unless --list-devices/--list-output-devices)")
+        if not args.provider:
+            parser.error("--provider is required (unless --list-devices/--list-output-devices)")
+
+    return ClientConfig(
+        url=args.url or "",
+        provider=args.provider or "",
+        input_device=args.input_device,
+        output_device=args.output_device,
+        sample_rate=args.sample_rate,
+        channels=DEFAULT_CHANNELS,
+        block_size=args.block_size,
+        max_reconnect_attempts=args.max_reconnect_attempts,
+        backoff_base_seconds=args.backoff_base_seconds,
+        manual_flush=args.manual_flush,
+        tts=args.tts,
+        list_devices=args.list_devices,
+        list_output_devices=args.list_output_devices,
+    )

@@ -8,7 +8,7 @@ child process. This module is named for the *role* it plays — transport —
 not for the wire protocol it currently happens to use. The implementation
 below uses a WebSocket, but nothing about the Shell's process-supervision
 code (runtime.cloud_run_shell) or the Runtime child (phantom_runtime.py)
-depends on that choice: both sides only know about two plain pipe file
+depends on that choice: both sides only know about three plain pipe file
 descriptors per session. Swapping the wire protocol later means touching
 this file only.
 
@@ -41,6 +41,13 @@ Compatibility Shell's existing boundary contract):
     verbatim and unexamined — this module has no knowledge of audio
     formats, sample rates, or block sizes; that is Runtime execution
     concern (phantom_runtime.py's --audio-source fd).
+  - Relay inbound text frames (H6: Control Events, e.g.
+    {"command": "generate_summary"}) to that session's control-in pipe,
+    verbatim and unexamined, one frame per newline-terminated line --
+    this module does not construct, parse, or validate command content;
+    that is Runtime execution concern (phantom_runtime.py's
+    PHANTOM_CONTROL_FD reader, which dispatches to the same functions
+    the local keyboard loop already calls).
   - Relay outbound lines from that session's event-out pipe to the client
     as WebSocket text frames, verbatim and unexamined. The child owns the
     event schema (see phantom_runtime.py's _emit_event(): every line is
@@ -268,7 +275,19 @@ class TransportGateway:
 
             async for message in websocket:
                 if isinstance(message, str):
-                    continue  # audio-in is binary only; ignore stray text frames
+                    # Control Event (H6): one JSON command per text frame,
+                    # e.g. {"command": "generate_summary"}. Relayed
+                    # verbatim to the session's control pipe -- this
+                    # module has no knowledge of what commands exist or
+                    # what they do; that is Runtime execution concern
+                    # (phantom_runtime.py's PHANTOM_CONTROL_FD reader).
+                    try:
+                        await loop.run_in_executor(
+                            None, os.write, session.control_fd_w, message.encode("utf-8") + b"\n"
+                        )
+                    except OSError:
+                        break  # session's control pipe gone (e.g. child already exited)
+                    continue
                 try:
                     await loop.run_in_executor(
                         None, os.write, session.audio_fd_w, message
