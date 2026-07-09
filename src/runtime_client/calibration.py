@@ -6,22 +6,31 @@ see docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md, section 6.2, and
 docs/designs/IMPLEMENTATION_PLAN_P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md,
 section 3.1).
 
-Phase 1 scope only: measuring the acoustic Noise Floor of the current
+Phase 1 scope: measuring the acoustic Noise Floor of the current
 environment from a short window of captured audio blocks, detecting
 contamination (speech leaking into what was supposed to be a silent
 measurement window) and retrying, and reducing a clean window down to
 a single Noise Floor value via its 90th percentile.
 
-Out of scope for this module as of Phase 1 (see the Implementation
-Plan's Phase boundaries -- these are Phase 2+ and deliberately not
-implemented here):
-  - Speech Gate derivation (design doc section 6.3: noise_floor -> gate)
+Phase 2 scope (this addition): deriving the Speech Gate from the Noise
+Floor that Phase 1's EnvironmentObserver measured (design doc section
+6.3's clamp(noise_floor * 3.0, min=150, max=2500) formula), and
+reporting the outcome as a CalibrationResult. CalibrationEngine takes
+an ObservationResult -- EnvironmentObserver's own output -- as its
+only input; it does not sample audio itself.
+
+Out of scope for this module as of Phase 2 (see the Implementation
+Plan's Phase boundaries, and this Phase's own explicit exclusions --
+these are Phase 3+ and deliberately not implemented here):
+  - Runtime UI (design doc section 8)
   - CalibrationState / the Runtime state machine (design doc section 7)
   - Drift monitoring / re-calibration triggers (design doc section 6.4)
-  - Fallback policy decisions (design doc section 9)
+  - Fallback policy decisions beyond reporting success=False (design
+    doc section 9) -- Phase 2 reports a failed calibration as-is; it
+    does not adopt a substitute Fallback value
   - Any wiring into AudioBridge, main.py, keyboard_bridge.py,
     websocket_client.py, or the Server -- this module is not imported
-    by, and does not import, any of those as of Phase 1.
+    by, and does not import, any of those as of Phase 2.
 
 On the block_rms() dependency below: it is a pure function (RMS of one
 PCM16LE block, no dependency on any AudioBridge instance state), so it
@@ -49,6 +58,15 @@ EXPORTED API:
                         on failure), how many blocks were sampled in
                         the winning window, and how many attempts it
                         took.
+  CalibrationEngine   -- derives the Speech Gate from an
+                        ObservationResult via design doc section 6.3's
+                        clamp(noise_floor * 3.0, 150, 2500) formula.
+  CalibrationResult   -- outcome of a CalibrationEngine run: whether
+                        the underlying observation succeeded, the
+                        noise_floor it was derived from, the derived
+                        speech_gate (or None on failure), and the
+                        sample_count/attempts carried over from the
+                        ObservationResult it was derived from.
 """
 
 from dataclasses import dataclass
@@ -78,6 +96,23 @@ DEFAULT_NOISE_FLOOR_SAFETY_FLOOR = 150.0
 # design doc section 6.2: "最大3回" -- 3 total attempts, matching section
 # 9.4's "2.5秒 x リトライ(最大3回) = 最大7.5秒" arithmetic
 DEFAULT_MAX_ATTEMPTS = 3
+
+# design doc section 6.3: "倍率 3.0 は「ノイズフロアの3倍以上の音圧を、
+# 発話の意思とみなす」という単一の相対ルール" -- the Speech Gate's relative
+# multiplier over the measured Noise Floor. A distinct constant from
+# Phase 1's DEFAULT_NOISE_FLOOR_SAFETY_FLOOR above even though it will
+# turn out to share the same numeric value as SPEECH_GATE_MIN below --
+# see that constant's docstring for why Phase 1 deliberately did not
+# reuse the Speech Gate formula itself.
+DEFAULT_SPEECH_GATE_MULTIPLIER = 3.0
+
+# design doc section 6.3: "`min=150` は...Gate が過敏になりすぎて僅かな
+# 環境音にも反応することを防ぐ安全下限" -- the clamp's lower bound.
+DEFAULT_SPEECH_GATE_MIN = 150.0
+
+# design doc section 6.3: "`max=2500` は...Gate が現実的に到達不能な値
+# まで跳ね上がることを防ぐ安全上限" -- the clamp's upper bound.
+DEFAULT_SPEECH_GATE_MAX = 2500.0
 
 
 class NoiseFloorSampler:
@@ -238,3 +273,75 @@ class EnvironmentObserver:
     def result(self) -> Optional[ObservationResult]:
         """None until is_finished is True, then the final outcome."""
         return self._result
+
+
+@dataclass(frozen=True)
+class CalibrationResult:
+    """
+    Outcome of a CalibrationEngine.calibrate() call. Mirrors the
+    ObservationResult it was derived from (success, sample_count,
+    attempts carried over verbatim) plus the derived speech_gate.
+    success=False (observation failed) means noise_floor and
+    speech_gate are both None -- design doc section 6.3's derivation
+    has nothing to operate on without a measured Noise Floor. Deciding
+    what to do about a failed calibration (Fallback policy, UI
+    messaging) is explicitly Phase 3+ (see module docstring); this
+    dataclass only reports what was derived.
+    """
+
+    success: bool
+    noise_floor: Optional[float]
+    speech_gate: Optional[float]
+    sample_count: int
+    attempts: int
+
+
+class CalibrationEngine:
+    """
+    Derives the Speech Gate from an EnvironmentObserver's
+    ObservationResult, per design doc section 6.3:
+
+        speech_gate = clamp(noise_floor * multiplier, gate_min, gate_max)
+
+    Takes only an ObservationResult as input (design doc's Runtime
+    Philosophy: derive Runtime parameters from Runtime Observation, not
+    from assumed fixed values) -- it does not sample audio itself and
+    has no dependency on NoiseFloorSampler.
+    """
+
+    def __init__(
+        self,
+        multiplier: float = DEFAULT_SPEECH_GATE_MULTIPLIER,
+        gate_min: float = DEFAULT_SPEECH_GATE_MIN,
+        gate_max: float = DEFAULT_SPEECH_GATE_MAX,
+    ) -> None:
+        self._multiplier = multiplier
+        self._gate_min = gate_min
+        self._gate_max = gate_max
+
+    def _derive_speech_gate(self, noise_floor: float) -> float:
+        return max(self._gate_min, min(noise_floor * self._multiplier, self._gate_max))
+
+    def calibrate(self, observation: ObservationResult) -> CalibrationResult:
+        """
+        Derive a CalibrationResult from an ObservationResult. If the
+        observation failed (design doc section 6.2's retry exhaustion),
+        the calibration fails too -- there is no noise_floor to derive
+        a speech_gate from.
+        """
+        if not observation.success or observation.noise_floor is None:
+            return CalibrationResult(
+                success=False,
+                noise_floor=None,
+                speech_gate=None,
+                sample_count=observation.sample_count,
+                attempts=observation.attempts,
+            )
+
+        return CalibrationResult(
+            success=True,
+            noise_floor=observation.noise_floor,
+            speech_gate=self._derive_speech_gate(observation.noise_floor),
+            sample_count=observation.sample_count,
+            attempts=observation.attempts,
+        )

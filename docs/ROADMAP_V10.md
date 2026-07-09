@@ -133,3 +133,20 @@ Scenario-2はStress Testであり、通常利用品質の検証ではない。Sc
 10/10 PASS・Acceptance PASS・Final Validation PASS・Cloud Run実機PASSが
 確認されており、Hackathon提出品質には問題ない。そのため本件はHackathon
 提出後対応として扱う。
+
+---
+
+## P5-4 Adaptive Runtime Calibration
+
+**Source:** `docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md`,
+`docs/designs/IMPLEMENTATION_PLAN_P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md`
+
+| Phase | Component | Status |
+| --- | --- | --- |
+| Phase 1 | Environment Observation | Completed |
+| Phase 2 | Calibration Engine | Completed |
+| Phase 3 | Runtime UI | Planned |
+| Phase 4 | Re-calibration | Planned |
+| Phase 5 | Integration | Planned |
+
+Source: `docs/MIGRATION_MATRIX.md` §7 Validation Log, 2026-07-10 entry.

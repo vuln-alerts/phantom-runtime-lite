@@ -225,6 +225,7 @@ Legend: **C** = Client Candidate, **S** = Server Candidate. A row may carry both
 | Transcript persistence (inline duplicate) | v22.py:659-696 `_persist_entry()` | same as above | Inline fallback mirroring the extracted module | | ✓ | Unknown |
 | Manual push-to-record buffering | `src/audio/vad_buffering.py` (`VADBuffer.recording_active/.flush()/.status()/.show_recording_status()`), toggled via `r` key | keyboard controller | Operator-controlled recording toggle + manual buffer flush | ✓ | ✓ | Unknown |
 | Runtime Client recording send gate | `src/runtime_client/audio_bridge.py` (`AudioBridge._run_pump()`), `src/runtime_client/keyboard_bridge.py` (`build_keyboard_thread()`'s `recording_active`), wired in `src/runtime_client/main.py` | AudioCapture, `NotifyingEvent` | Client-side enforcement of RECORDING OFF: stops forwarding captured audio to the Server the instant `r` is pressed, independent of the P5-4-1 silence gate | ✓ | | Completed (Unit Tested) — Production Verification Pending; see P5-4-2 entry §7 |
+| Adaptive Runtime Calibration — Calibration Engine (Speech Gate derivation) | `src/runtime_client/calibration.py` (`CalibrationEngine`, `CalibrationResult`) | `EnvironmentObserver`/`ObservationResult` (Phase 1, same module) | Derives the Speech Gate from a measured Noise Floor per `docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md` §6.3's `clamp(noise_floor * 3.0, min=150, max=2500)`; reports the outcome as `CalibrationResult`. Not yet wired into `AudioBridge`/`main.py` (Phase 5, not started) | ✓ | | Completed (Unit Tested) — Production Verification Pending; see 2026-07-10 entry §7 |
 | Debug audio recording | v22.py:696-777 `_save_debug_audio()` | filesystem | Persists raw captured audio as WAV for troubleshooting | ✓ | | Unknown |
 | Session/transcript artifacts (data) | `src/sessions/*.jsonl`, `src/backup/session_*.jsonl`, `src/backup/transcript_*.jsonl` | none | On-disk output examples, not code | | | Unknown |
 
@@ -664,3 +665,32 @@ python -m runtime_client --url https://<cloud-run-url> --provider openai
 The unit-level fix (`AudioBridge` never enqueues a block while `recording_active` is clear) is what this manual pass is expected to confirm; it changes nothing about the WebSocket contract, so no other part of the P5-4-1 production validation should be at risk.
 
 **Result:** New Recording-table row above (`Runtime Client recording send gate`) added at status `Completed (Unit Tested) — Production Verification Pending`. Bug fixed with a 3-file, ~15-line Client-only change (excluding tests), 9 new tests added, 0 regressions (362 passed, 2 skipped, up from 353/2 pre-existing on this branch's `main`). This status stands until the manual production Cloud Run E2E step above is actually run, at which point this entry should be updated with those results — see Final Report for this distinction.
+
+### 2026-07-10 — P5-4 Adaptive Runtime Calibration, Phase 2: Calibration Engine
+
+**Status: Completed (Unit Tested) — Production Verification Pending.**
+
+**Scope:** Phase 2 of `docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md`, per `docs/designs/IMPLEMENTATION_PLAN_P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md` §2's Phase ordering. Extends `src/runtime_client/calibration.py` (Phase 1's `NoiseFloorSampler`/`EnvironmentObserver`/`ObservationResult`, already on `main`) with Speech Gate derivation only. Explicitly out of scope for this pass, per task instructions: Runtime UI (§8), the Runtime state machine (§7), drift monitoring/re-calibration (§6.4), and any wiring into `AudioBridge`/`main.py`/`keyboard_bridge.py`/`websocket_client.py`/the Server.
+
+**Implemented:**
+- `CalibrationEngine` — takes an `EnvironmentObserver` `ObservationResult` as its only input (no audio sampling of its own); derives the Speech Gate per design doc §6.3.
+- `CalibrationResult` (frozen dataclass) — `success`/`noise_floor`/`speech_gate`/`sample_count`/`attempts`; mirrors a failed `ObservationResult` (`success=False`, `noise_floor`/`speech_gate` both `None`) rather than substituting a Fallback value (Fallback policy is explicitly Phase 3+/§9, not this pass).
+- Speech Gate derivation formula, implemented verbatim from §6.3: `speech_gate = clamp(noise_floor * multiplier, gate_min, gate_max)`. Named constants only, no magic numbers: `DEFAULT_SPEECH_GATE_MULTIPLIER = 3.0`, `DEFAULT_SPEECH_GATE_MIN = 150.0`, `DEFAULT_SPEECH_GATE_MAX = 2500.0` — distinct constants from Phase 1's `DEFAULT_NOISE_FLOOR_SAFETY_FLOOR`, even though it shares the same numeric value as the new `DEFAULT_SPEECH_GATE_MIN`, per that constant's own docstring caveat that Phase 1 deliberately did not reuse the Speech Gate formula.
+
+**Files Changed:** `src/runtime_client/calibration.py`, `tests/test_runtime_client_calibration.py` — no other file touched (no `AudioBridge`, `main.py`, `keyboard_bridge.py`, `websocket_client.py`, or Server change).
+
+**Unit Tests:**
+- `TestCalibrationEngineDerivation` (6 tests): default constants match §6.3 exactly; noise_floor below the point where ×3.0 clears 150 clamps `speech_gate` to 150; a normal noise_floor multiplies by 3.0 (182 → 546, the design doc's own §8.3 example); noise_floor above the point where ×3.0 exceeds 2500 clamps to 2500; `CalibrationResult` holds all fields correctly; custom multiplier/clamp bounds are honored.
+- `TestCalibrationEngineWithEnvironmentObserver` (2 tests): `CalibrationEngine.calibrate()` consumes a real `EnvironmentObserver`'s `ObservationResult` end-to-end, both on first-attempt success and on full retry-exhaustion failure (`success=False` in, `success=False`/`speech_gate=None` out — no substitute value invented).
+
+**Validation Results:**
+1. `python3 -m py_compile src/runtime_client/calibration.py tests/test_runtime_client_calibration.py` — clean.
+2. `python3 -m unittest tests.test_runtime_client_calibration -v` — **28 passed** (19 Phase 1 + 9 new Phase 2), 0 failed.
+3. `python3 -m unittest discover -s tests -p "test_*.py"` (full suite) — **390 passed, 2 skipped**. The 2 skips are the same pre-existing `GEMINI_API_KEY`/`OPENAI_API_KEY`-gated live-test self-skips noted in the P5-4-2 entry above, unrelated to this change. Zero regressions.
+4. No Cloud Run environment, deployed or local, no OpenAI API, and no real microphone were used in this pass, per this task's explicit constraints.
+
+**Backward Compatibility:** No impact. `CalibrationEngine`/`CalibrationResult` are not imported by, and do not import, `AudioBridge`, `main.py`, `keyboard_bridge.py`, `websocket_client.py`, `ui/keyboard.py`, or any Server module — `calibration.py` remains a standalone module with zero call sites elsewhere in the tree. The existing Recording Gate (P5-4-2) and Silence Gate (P5-4-1) are untouched and unaffected.
+
+**Next Step:** Phase 3 (Runtime UI, design doc §8) is the next phase per the Implementation Plan's ordering — rendering the five calibration screens against `CalibrationEngine`'s state/numbers. Not started in this pass.
+
+**Result:** New row above (`Adaptive Runtime Calibration — Calibration Engine (Speech Gate derivation)`) added to the Recording table at status `Completed (Unit Tested) — Production Verification Pending`. 2 new test classes / 9 new tests added, 0 regressions (390 passed, 2 skipped, up from 381/2 pre-existing on this branch's `main`, which already included Phase 1's 19 `calibration.py` tests). This status stands until a live-audio/Production Cloud Run pass actually exercises Speech Gate derivation against a real measured Noise Floor, at which point this entry should be updated with those results.
