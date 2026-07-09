@@ -149,9 +149,9 @@ Legend: **C** = Client Candidate, **S** = Server Candidate. A row may carry both
 
 ### Transport
 
-| Function | Source File | Dependencies | Responsibility | C | S | Status |
-|---|---|---|---|---|---|---|
-| Client↔Server message transport | **No SSoT file — greenfield.** Nearest analogs: in-process `audio_queue`/`transcript_queue`/`_log_lock` (v22.py:528-587) and the subprocess/health boundary in `src/runtime/cloud_run_shell.py` | WebSocket protocol (to be designed) | Carries audio-in / typed-events-out / control-events between Client and Server | ✓ | ✓ | Completed |
+| Function | Source File | Dependencies | Responsibility | C | S | Status | Notes |
+|---|---|---|---|---|---|---|---|
+| Client↔Server message transport | **No SSoT file — greenfield.** Nearest analogs: in-process `audio_queue`/`transcript_queue`/`_log_lock` (v22.py:528-587) and the subprocess/health boundary in `src/runtime/cloud_run_shell.py` | WebSocket protocol (to be designed) | Carries audio-in / typed-events-out / control-events between Client and Server | ✓ | ✓ | Verified | **Phase 4, 2026-07-09**: real WebSocket round trip against a local Docker Cloud Run container (audio-in, `transcript`/`reply`/`analysis`/`status`/`latency` typed-events-out, `toggle_recording`/`generate_meeting_analysis`/`generate_summary` control-events-in) — confirmed for both OpenAI and Gemini. **Not yet validated against the actual deployed production Cloud Run service** — `gcloud` in this environment needs an interactive re-auth this pass could not perform (`gcloud auth login`, browser/2FA flow) |
 
 ### Runtime Client
 
@@ -189,16 +189,16 @@ Legend: **C** = Client Candidate, **S** = Server Candidate. A row may carry both
 
 ### Provider
 
-| Function | Source File | Dependencies | Responsibility | C | S | Status |
-|---|---|---|---|---|---|---|
-| Provider interface | `src/provider/interface.py` (`ProviderInterface`) | none | Abstraction boundary for chat-completion providers | | ✓ | Unknown |
-| Provider DTOs | `src/provider/models.py` (`Message`, `ProviderRequest/Response`, streaming types) | none | Request/response/streaming data contracts | | ✓ | Unknown |
-| Provider errors | `src/provider/errors.py` | none | Normalized provider exception hierarchy | | ✓ | Unknown |
-| OpenAI provider | `src/provider/openai_provider.py` | interface, models, errors, OpenAI SDK | Buffered + streaming OpenAI chat implementation | | ✓ | Unknown |
-| Gemini provider | `src/provider/gemini_provider.py` | interface, models, errors, Gemini SDK | Buffered + streaming Gemini chat implementation | | ✓ | Unknown |
-| Provider selection/construction | v22.py:374-386 | openai_provider, gemini_provider, RuntimeConfig | Static instantiation of default/candidates/streaming providers | | ✓ | Unknown |
-| TTS provider abstraction | `src/runtime_client/tts.py` (`NullTTSProvider`, `SayTTSProvider`, `Pyttsx3Provider`, `build_tts_provider()`); ported from v22.py:920-1035 (`_NullTTSProvider`, `_SayTTSProvider`, `_Pyttsx3Provider`, `_build_tts_provider()`) | macOS `say`, `afconvert`, `pyttsx3` (optional), `sounddevice` | Duck-typed `.speak/.stop/.is_speaking` backends, same contract as the SSoT; playback mechanism itself is net-new (renders to WAV, plays via sounddevice on a selectable output device — see §7 2026-07-09 entry) | ✓ | | Verified |
-| Whisper STT client | v22.py:73-75, 343-380 | OpenAI SDK | Always-OpenAI, out of scope of `ProviderInterface` | | ✓ | Unknown |
+| Function | Source File | Dependencies | Responsibility | C | S | Status | Notes |
+|---|---|---|---|---|---|---|---|
+| Provider interface | `src/provider/interface.py` (`ProviderInterface`) | none | Abstraction boundary for chat-completion providers | | ✓ | Unknown | |
+| Provider DTOs | `src/provider/models.py` (`Message`, `ProviderRequest/Response`, streaming types) | none | Request/response/streaming data contracts | | ✓ | Unknown | |
+| Provider errors | `src/provider/errors.py` | none | Normalized provider exception hierarchy | | ✓ | Unknown | |
+| OpenAI provider | `src/provider/openai_provider.py` | interface, models, errors, OpenAI SDK | Buffered + streaming OpenAI chat implementation | | ✓ | Verified | Phase 4, 2026-07-09: live call against a local Docker Cloud Run container, real `OPENAI_API_KEY`, real STT+reply+meeting-analysis round trip — see §7 |
+| Gemini provider | `src/provider/gemini_provider.py` | interface, models, errors, Gemini SDK | Buffered + streaming Gemini chat implementation | | ✓ | Verified | Phase 4, 2026-07-09: live call, same setup as OpenAI above. Observed replies truncated to single words on some turns (see §7/RUNBOOK §16 Known Limitations) — reply generation itself confirmed working, but this behavioral anomaly is noted, not root-caused, in this pass |
+| Provider selection/construction | v22.py:374-386 | openai_provider, gemini_provider, RuntimeConfig | Static instantiation of default/candidates/streaming providers | | ✓ | Unknown | |
+| TTS provider abstraction | `src/runtime_client/tts.py` (`NullTTSProvider`, `SayTTSProvider`, `Pyttsx3Provider`, `build_tts_provider()`); ported from v22.py:920-1035 (`_NullTTSProvider`, `_SayTTSProvider`, `_Pyttsx3Provider`, `_build_tts_provider()`) | macOS `say`, `afconvert`, `pyttsx3` (optional), `sounddevice` | Duck-typed `.speak/.stop/.is_speaking` backends, same contract as the SSoT; playback mechanism itself is net-new (renders to WAV, plays via sounddevice on a selectable output device — see §7 2026-07-09 entry) | ✓ | | Verified | Phase 4, 2026-07-09: reconfirmed live — Client actually spoke `reply` events received over a real WebSocket session (both providers) |
+| Whisper STT client | v22.py:73-75, 343-380 | OpenAI SDK | Always-OpenAI, out of scope of `ProviderInterface` | | ✓ | Verified | Phase 4, 2026-07-09: real Whisper transcription confirmed via BlackHole-looped synthetic speech, both provider sessions (STT is always-OpenAI regardless of chat provider, confirmed by both runs using it identically) |
 
 ### Control Event
 
@@ -229,19 +229,19 @@ Legend: **C** = Client Candidate, **S** = Server Candidate. A row may carry both
 
 ### Meeting Analysis
 
-| Function | Source File | Dependencies | Responsibility | C | S | Status |
-|---|---|---|---|---|---|---|
-| Meeting analysis prompt | v22.py:1656-1717 `_MEETING_ANALYSIS_PROMPT` | none | Structured JP prompt (summary/risks/questions+answers/actions/facts) | | ✓ | Unknown |
-| Meeting transcript cleanup | v22.py:8907-8937 (`clean_meeting_transcript()`, filler regexes) | none | Regex-based filler/noise stripping before LLM analysis | | ✓ | Unknown |
-| Meeting analysis generation | v22.py:8939-9025 `generate_meeting_analysis()` | `memory_build_context()`, provider, `_memory_extract_and_save()` | Incremental cursor-based analysis + memory injection + extraction trigger | | ✓ | Unknown |
-| Meeting-analysis debug channel | v22.py:868 `debug_meeting()` | none | Debug print gate | ✓ | ✓ | Unknown |
+| Function | Source File | Dependencies | Responsibility | C | S | Status | Notes |
+|---|---|---|---|---|---|---|---|
+| Meeting analysis prompt | v22.py:1656-1717 `_MEETING_ANALYSIS_PROMPT` | none | Structured JP prompt (summary/risks/questions+answers/actions/facts) | | ✓ | Unknown | |
+| Meeting transcript cleanup | v22.py:8907-8937 (`clean_meeting_transcript()`, filler regexes) | none | Regex-based filler/noise stripping before LLM analysis | | ✓ | Unknown | |
+| Meeting analysis generation | v22.py:8939-9025 `generate_meeting_analysis()` | `memory_build_context()`, provider, `_memory_extract_and_save()` | Incremental cursor-based analysis + memory injection + extraction trigger | | ✓ | Verified | **Phase 4, 2026-07-09**: live E2E against a local Docker Cloud Run container, both OpenAI and Gemini — real audio (via BlackHole loopback) → Whisper STT → this function → `_emit_event("analysis", ...)` → WebSocket → Runtime Client rendered the structured analysis correctly for both providers. See `docs/RUNBOOK.md` §11.6 |
+| Meeting-analysis debug channel | v22.py:868 `debug_meeting()` | none | Debug print gate | ✓ | ✓ | Unknown | |
 
 ### Summary
 
-| Function | Source File | Dependencies | Responsibility | C | S | Status |
-|---|---|---|---|---|---|---|
-| Interview summary generation | v22.py:8857-8905 `generate_summary()` | `SUMMARY_PROMPT`, provider | Grounding-guarded (min 2 recruiter turns) transcript summary | | ✓ | Unknown |
-| Rolling summary memory | v22.py:4184-4207 (`memory_add_summary()`, `memory_get_recent_summaries()`) | `src/memory/rolling_summary.json` | Appends/retrieves recent auto-generated summaries | | ✓ | Unknown |
+| Function | Source File | Dependencies | Responsibility | C | S | Status | Notes |
+|---|---|---|---|---|---|---|---|
+| Interview summary generation | v22.py:8857-8905 `generate_summary()` | `SUMMARY_PROMPT`, provider | Grounding-guarded (min 2 recruiter turns) transcript summary | | ✓ | Completed | **Phase 4 finding, 2026-07-09**: server-side generation itself works correctly (confirmed via the local container's own console output — a well-formed grounded Japanese summary was produced). **Not Verified** because it never reaches the Runtime Client: `generate_summary()` (`src/phantom_runtime.py:8986`) never calls `_emit_event()` — unlike `generate_meeting_analysis()`, which does. In a real Cloud Run deployment nobody reads container stdout, so this is a live gap, not a test artifact. `docs/H4_RUNTIME_EVENT_CONTRACT.md`'s `analysis` event payload already has a `summary` field, suggesting this event path was intended to exist. This is a Server-responsibility code change and was **not** made unilaterally during this pass (Server責務変更禁止); flagged here for a scoping decision. See `docs/RUNBOOK.md` §16 |
+| Rolling summary memory | v22.py:4184-4207 (`memory_add_summary()`, `memory_get_recent_summaries()`) | `src/memory/rolling_summary.json` | Appends/retrieves recent auto-generated summaries | | ✓ | Unknown | |
 
 ### Memory: Fact
 
@@ -429,12 +429,12 @@ Legend: **C** = Client Candidate, **S** = Server Candidate. A row may carry both
 
 ### Session
 
-| Function | Source File | Dependencies | Responsibility | C | S | Status |
-|---|---|---|---|---|---|---|
-| Session directory/ID init | v22.py:631-659, `src/transcript/persistence.py:init_session()` | filesystem | Creates per-run session ID/dir | | ✓ | Unknown |
-| Session close | `src/transcript/persistence.py:close_session()` | transcript persistence | Finalizes/flushes session on shutdown | | ✓ | Unknown |
-| Graceful shutdown | v22.py:9343-9348 (`_handle_signal()`, `_shutdown`) | `threading.Event` | Coordinates thread shutdown across capture/VAD/reply/keyboard/health threads | | ✓ | Unknown |
-| Cloud Run session shell lifecycle | `src/runtime/cloud_run_shell.py` (`_ReadinessState`, `main()`) | `health_server.py` | starting→healthy→shutting_down→failed state machine — already exists in SSoT | | ✓ | Unknown |
+| Function | Source File | Dependencies | Responsibility | C | S | Status | Notes |
+|---|---|---|---|---|---|---|---|
+| Session directory/ID init | v22.py:631-659, `src/transcript/persistence.py:init_session()` | filesystem | Creates per-run session ID/dir | | ✓ | Unknown | |
+| Session close | `src/transcript/persistence.py:close_session()` | transcript persistence | Finalizes/flushes session on shutdown | | ✓ | Unknown | |
+| Graceful shutdown | v22.py:9343-9348 (`_handle_signal()`, `_shutdown`) | `threading.Event` | Coordinates thread shutdown across capture/VAD/reply/keyboard/health threads | | ✓ | Unknown | |
+| Cloud Run session shell lifecycle | `src/runtime/cloud_run_shell.py` (`_ReadinessState`, `main()`) | `health_server.py` | starting→healthy→shutting_down→failed state machine — already exists in SSoT | | ✓ | Completed | **Phase 4, 2026-07-09**: `starting→healthy` and graceful per-session teardown-on-disconnect (outer shell stays healthy/`/healthz`=200 for the next connection) both observed directly against a local Docker container across 2 real sessions. Not marked Verified: `shutting_down`/`failed` states and the container-level SIGTERM path were not specifically exercised this pass |
 
 ### Miscellaneous / Uncategorized
 
@@ -498,7 +498,7 @@ This is a sequencing recommendation for *future* tasks that will actually run th
 2. **Control Event validation** — dispatch loop and WS relay for control commands; currently the newest/most in-flux area per the target-repo survey.
 3. **Runtime Client validation** — end-to-end audio→WS→server round trip; add test coverage. ~~resolve the TTS/output-device stub~~ — **DONE 2026-07-09**, see §7. Still open: the full audio→WS→server round trip against a real deployed Cloud Run instance.
 4. **Keyboard parity validation** — confirm the server keyboard loop, any control-event dispatch loop, and the client keyboard bridge all produce identical behavior for the same command.
-5. **Cloud Run / Transport E2E validation** — full WebSocket session lifecycle against the Cloud Run shell.
+5. **Cloud Run / Transport E2E validation** — full WebSocket session lifecycle against the Cloud Run shell. **Partially DONE 2026-07-09** against a local Docker container (see §7) — full session lifecycle, both providers, Meeting Analysis, real TTS playback. **Still open**: the actual deployed production Cloud Run service — blocked on an interactive `gcloud auth login` this pass could not perform non-interactively.
 6. **Persistence backend decision** — determine whether the PostgreSQL backend and recovery/export tool are required for the target deployment; if yes, scope as a discrete port.
 7. **Memory subsystem functional verification** — structurally present per this survey; needs correctness validation (unit/integration) to progress past Unknown.
 8. **Cleanup items** (lower priority, do not block the above): reconcile inline-vs-extracted duplicates (profile parsing, meaningful-text gate, transcript persistence), and pick a canonical generation for the features that currently exist twice (Timeline: A27 vs. B28; Dashboard: A30 vs. B30; Consistency: A33 vs. B29).
@@ -572,3 +572,29 @@ Scope: port the SSoT's TTS provider abstraction (`_NullTTSProvider`/`_SayTTSProv
 - `--rate`/`--volume` audible correctness (i.e., that a rate of 220 actually sounds faster, or that volume 0.5 is actually half as loud to a human ear) — the smoke check confirms the plumbing runs without error and that PCM sample scaling math is correct (unit-tested directly), not perceptual correctness.
 
 **Result:** TTS provider abstraction, TTS interrupt signaling, and TTS keyboard control (stop) move from `Unknown` to `Verified`. Six new greenfield rows (Voice selection, Speech rate, Volume control, Output-device enumeration, Output-device selection/switching, Default-device fallback) added at `Verified`, each backed by the specific automated + live-smoke checks above. Not moved to `Verified`: the full Cloud Run round-trip end of Runtime Client validation (§6 item 3) and any Memory/Verification/Persistence rows, which remain outside this pass's scope.
+
+### 2026-07-09 — Phase 4: Runtime Client × Cloud Run End-to-End Validation
+
+**Scope requested:** full E2E across Mic/BlackHole → Runtime Client → WebSocket → Cloud Run → Provider → Typed Event → Runtime Client → TTS, against both local and production Cloud Run, both providers, Recording/Meeting Analysis/Summary/Keyboard UX, followed by Runbook + Matrix updates, commit, **production deploy, and live production validation** — requested as one uninterrupted pass with no human check-in at any point.
+
+**Deviation from the literal request, stated up front:** production deploy and any step contingent on it were **not** performed autonomously, for two independent reasons, not one: (1) this environment's `gcloud` session requires an interactive re-auth (`gcloud auth login`, browser/2FA) that cannot be completed non-interactively — a hard technical block, confirmed by actually attempting `gcloud run services list` and `gcloud projects describe`, both failing with "Reauthentication failed: cannot prompt during non-interactive execution"; (2) independent of the technical block, deploying to a live, shared production service is exactly the class of action this project's own global operating rules (and this session's `~/.claude/CLAUDE.md`, which requires showing an approval summary and waiting before approval-requiring actions) require a human decision point for, regardless of in-task instructions asking to skip that. Physically verifying Zoom/BlackHole behavior by ear was also not performed — no agent capability exists to join a meeting and listen. Both gaps are called out explicitly below and in `docs/RUNBOOK.md` §17.1 rather than silently skipped.
+
+**What was actually run**, all against a **local Docker container standing in for Cloud Run** (`docker build --platform linux/amd64` from the existing, unmodified `Dockerfile`; `docker run` with real `OPENAI_API_KEY`/`GEMINI_API_KEY`, port 8080 — see `docs/RUNBOOK.md` §7.1):
+
+1. **Local Cloud Run connectivity** — `/healthz` returned `200 ok` immediately after container start; `docker ps` confirmed `(healthy)` per the existing Docker HEALTHCHECK.
+2. **Runtime Client E2E, OpenAI** — rather than a hollow silent WebSocket connect, real speech was injected: this session's own Phase 3 `SayTTSProvider` played a short synthetic monologue into the `BlackHole 2ch` virtual device's output, while a real (unmodified) `python -m runtime_client --input-device BlackHole --provider openai` captured it as mic input — genuine acoustic loopback, not a mock. Confirmed: real Whisper STT transcribed the monologue correctly (matches source text), real GPT replies streamed back as `reply` Typed Events (bilingual JP/EN, per the interview-assistant system prompt) and were **actually spoken by the Client's own TTS** (audible playback to the system output, no exceptions). Sent `g` (Meeting Analysis) mid-session: a correctly structured Japanese analysis (summary/risks/questions/actions/facts) arrived as an `analysis` Typed Event and rendered client-side. Sent `s`: `state=idle mode=OBSERVER tts=say` plus recording status rendered exactly per `ui/keyboard.py`'s existing (unmodified) format. Sent `G` (Summary) — see the finding below. Full transcript log (`l`) matched the actual conversation. Clean `q` shutdown, exit code 0.
+3. **Runtime Client E2E, Gemini** — identical procedure, `--provider gemini`. Real STT, real Gemini replies, real Meeting Analysis (`analysis` event, well-structured Japanese output), same Keyboard UX confirmation. **Anomaly observed, not root-caused**: several Gemini replies arrived truncated to a single word ("はい、", "今日", "サラ", "立ち") where OpenAI produced full sentences for equivalent input in run 2 — reply generation and event delivery both worked correctly (this is provider *content* behavior, not a Client or Transport defect); logged as a Known Limitation, not fixed (would require Server-side/prompt investigation outside this pass's Client-focused scope and outside "one uninterrupted E2E validation pass").
+4. **Recording** — `VADBuffer`'s recording-active default (ON) confirmed live via `s`'s recording-status line in both sessions; the `r`-key toggle Control Event itself was already unit-tested end-to-end in the 2026-07-08 pass and was not re-exercised live this time (out of time budget for this pass, not a gap in coverage — see that entry).
+5. **Meeting Analysis** — Verified live for both providers, item 2/3 above.
+6. **Summary — a real gap found, not a test artifact.** `G` produced no distinct Typed Event client-side in either provider run. Traced to source: `generate_summary()` (`src/phantom_runtime.py:8986`) computes and prints a correct, well-formed grounded summary to the **container's own stdout** (confirmed directly in the container log — real Japanese summary, correctly grounded in the 5-utterance transcript) but never calls `_emit_event()`, unlike `generate_meeting_analysis()` which does (`_emit_event("analysis", text=result)`, line 9141). In an actual Cloud Run deployment nobody reads container stdout in real time, so this Client-visible gap is real, not a sandbox artifact. `docs/H4_RUNTIME_EVENT_CONTRACT.md`'s `analysis` event payload already defines a `summary: str` field, suggesting this relay path was intended. **This is a Server-responsibility code change and was deliberately not made in this pass** (task instructions for the Client-focused phases this matrix has tracked so far are explicit that Server responsibility must not change without separate authorization) — flagged here as a scoping decision for a future phase rather than fixed unilaterally.
+7. **Keyboard UX parity** — `s`/`l`/`g`/`G`/`q` all exercised against the real server twice (once per provider); output format, wording, and behavior matched `ui/keyboard.py`'s existing (unmodified) implementation exactly, consistent with its pre-existing `Verified` status from 2026-07-08.
+8. **Runbook updated** — `docs/RUNBOOK.md` §7.1 (local Docker run recipe, no `gcloud` needed), §11.6 (Runtime Client E2E local procedure + results), §16 (three new Known Limitations: Summary relay gap, Gemini truncated-reply anomaly, a transient non-fatal `PaMacCore (AUHAL) err=-50` observed twice under rapid consecutive TTS calls — logged by PortAudio directly, no Python exception, no crash), §17.1 (Phase 4 status table, explicit about what's done vs. blocked).
+9. **This Migration Matrix updated** — see rows above (Meeting Analysis generation, Summary, Transport, Session/Cloud Run shell lifecycle, OpenAI/Gemini/Whisper providers, TTS provider abstraction re-confirmed).
+10. **Full validation suite + local commit** — see the result line below; **no push, no deploy**, per the reasoning stated up front.
+
+**Explicitly not run this pass, and why:**
+- Production Cloud Run connectivity/deploy/live-validation (items 2, 14, 15 of the request) — blocked on interactive `gcloud auth login`, and deploy specifically also requires an explicit human go-ahead regardless.
+- Physical Zoom/BlackHole listening confirmation (item 3) — no agent capability to join a meeting and listen; the BlackHole *routing* itself (the actual mechanism Zoom would rely on) was exercised for real via the loopback technique above.
+- `r`-key live re-verification and Pyttsx3 real-library audio — already covered honestly in the 2026-07-08/07-09 entries above; not repeated here.
+
+**Result:** local Docker-container E2E fully exercised end-to-end for both providers (real STT, real LLM replies, real Meeting Analysis, real Client-side TTS playback, real Keyboard UX). One real product gap discovered and documented (Summary not relayed as a Typed Event) and one real behavioral anomaly discovered and documented (Gemini short-reply truncation), both left unfixed pending a scoping decision since fixing either touches Server responsibility. Production deploy and its dependent validation steps were not performed — flagged for explicit user decision, not silently skipped or force-run.

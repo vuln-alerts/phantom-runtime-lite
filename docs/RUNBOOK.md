@@ -318,6 +318,49 @@ docker build \
 Successfully built
 ```
 
+## 7.1 Local Docker Run（Cloud Run代替 / gcloud不要、Phase 4で実施・検証済み）
+
+`gcloud`認証やCloud Runへのデプロイなしで、同一Dockerfileをローカルで起動し
+Runtime Clientから接続してE2E検証できる。実際に2026-07-09に実行し、
+OpenAI/Gemini両Providerで実音声（STT）→LLM応答→Typed Event→Client TTSの
+往復を確認済み（詳細は§16 Known Limitationsおよび
+`docs/MIGRATION_MATRIX.md`の2026-07-09エントリを参照）。
+
+実行
+
+```bash
+docker build --platform linux/amd64 -t phantom-runtime-lite:local .
+
+docker run --rm --name phantom-local -p 8080:8080 \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+  -e PORT=8080 \
+  phantom-runtime-lite:local
+```
+
+別ターミナルでヘルスチェック
+
+```bash
+curl -i http://localhost:8080/healthz
+```
+
+期待
+
+```
+HTTP/1.1 200 OK
+ok
+```
+
+Runtime Clientから接続（別ターミナル、`src/`から実行）
+
+```bash
+python -m runtime_client --url http://localhost:8080 --provider openai \
+  --tts say --output-device "BlackHole"
+```
+
+注記: Apple Siliconでは`--platform linux/amd64`によりエミュレーション実行となるため
+実機Cloud Runより起動・応答が多少遅くなる。機能検証目的では問題なし。
+
 ---
 
 # 8. Docker Push
@@ -493,6 +536,47 @@ HTTP400
 ```
 HTTP400
 ```
+
+---
+
+## 11.6 Runtime Client E2E（ローカル、Phase 4で実施・検証済み、2026-07-09）
+
+`websocat`は生WebSocketの疎通のみ確認するため、実際のRuntime Client（音声
+キャプチャ・Keyboard UX・TTS再生を含む）でのE2Eには使えない。マイクを使わず
+実音声を流し込むため、Phase 3で実装したBlackHoleルーティングとTTS
+Providerを利用し、`say`で合成音声をBlackHoleへ再生 → Runtime Clientが
+BlackHoleを入力デバイスとしてキャプチャ、という手順で実施した。
+
+実行（§7.1のローカルコンテナ起動後、`src/`から）
+
+```bash
+python -m runtime_client --url http://localhost:8080 --provider openai \
+  --input-device BlackHole --tts say --output-device "MacBook Proのスピーカー" &
+
+# 別プロセスで、Phase 3のSayTTSProviderを使いBlackHoleへ合成音声を再生
+python3 -c "
+import sys; sys.path.insert(0, '.')
+from runtime_client.output_device import resolve_output_device_id
+from runtime_client.tts import SayTTSProvider
+tts = SayTTSProvider(device_id=resolve_output_device_id('BlackHole'))
+tts.speak('Today we discussed the project timeline. Sarah will own the deployment task.')
+"
+```
+
+結果（OpenAI / Gemini 両方で実施）
+
+- Mic(BlackHole) → Runtime Client → WebSocket → ローカルCloud Run → Whisper STT → 実応答
+- `g`（ミーティング分析）: OpenAI/Gemini双方で構造化された分析結果（`analysis` Typed Event）が
+  Runtime Clientに届き、コンソールに正しくレンダリングされることを確認
+- `s`（状態表示 / TTS停止）: `state=idle mode=OBSERVER tts=say` + 録音状態が
+  Keyboard UX仕様どおりに表示されることを確認（既存UX変更なし）
+- Client側TTS: `reply` Typed Event受信後、実際に音声再生（`say`経由）が
+  行われることを確認
+
+既知の問題（§16参照）: `G`（インタビューまとめ生成）はサーバー側コンソールには
+正しく出力されるが、**Typed Eventとして送出されておらずRuntime Clientには届かない**。
+Gemini応答が一部のターンで単語単位に短く途切れる事象を観測（プロンプト/ストリーミング
+パース側の挙動と推測、Client側の問題ではない）。
 
 ---
 
@@ -678,6 +762,24 @@ ws://
 - Whisper(STT)はOpenAIを利用
 - Runtimeは単一モジュール
 - Provider RoutingはSession単位
+- **[Phase 4で確認, 2026-07-09] Summary（`G`キー/`generate_summary`）はTyped Eventとして
+  送出されない。** `phantom_runtime.py`の`generate_summary()`はサーバー側コンソールに
+  結果を`_print()`するのみで`_emit_event()`を一度も呼ばない（`generate_meeting_analysis()`
+  は`_emit_event("analysis", text=result)`を呼ぶのと対照的）。実際のCloud Run環境では
+  誰もコンテナのstdoutをリアルタイムに見ないため、Runtime ClientはSummary結果を一切
+  受け取れない。ローカルDocker E2E（§11.6）で実際に確認済み。`docs/H4_RUNTIME_EVENT_CONTRACT.md`
+  の`analysis`イベントスキーマは`summary: str`フィールドを持つため、本来この経路で
+  送出される設計だったと推測される。**サーバー責務のコード変更が必要なため、この
+  Runbook更新時点では未修正。** 対応要否は要判断（Server責務のため独断で変更していない）。
+- **[Phase 4で確認, 2026-07-09] Geminiの応答が一部ターンで単語単位に短く途切れる**
+  （例: "はい、" "今日" "サラ" "立ち"）。OpenAIでは同一入力に対しフル文の応答が返る。
+  ローカルDocker E2E（§11.6）で再現。原因未特定（プロンプト/ストリーミングパース側の
+  挙動と推測）。Client側の実装に起因するものではない（同一のTyped Event処理コードで
+  OpenAIは正常動作）。
+- **[Phase 4で確認, 2026-07-09] TTS再生中に稀に`PaMacCore (AUHAL) err=-50`がstderrに出る。**
+  連続した`reply` Typed Eventに対しClient側TTSが短時間に連続して`speak()`を呼ぶ際、
+  PortAudio側のストリーム再オープンが競合して起きる非致命的なエラー（例外は発生せず、
+  該当発話の再生のみスキップされ、後続の発話は正常に再生される）。ローカルE2Eで2回観測。
 
 ---
 
@@ -705,3 +807,19 @@ ws://
 - Scenario Test PASS
 - Acceptance Test PASS
 - Final Validation PASS
+
+## 17.1 Phase 4 実施状況（2026-07-09）
+
+| 項目 | 状態 | 備考 |
+|---|---|---|
+| ローカルCloud Run（Docker）接続確認 | 完了 | §7.1・§11.6。gcloud不要 |
+| Cloud Run本番接続確認 | **未実施** | `gcloud auth`の再認証がインタラクティブ入力必須のため非対話環境では実行不能。`gcloud auth login`の実行が必要 |
+| Zoom/BlackHole動作確認 | **未実施** | 実際にZoomアプリを開き人間が音声を聞いて確認する必要があるため、エージェント単体では検証不能。BlackHoleへのルーティング自体はPhase 3で実装・単体検証済み、本PhaseのローカルE2Eでも同一経路（BlackHole入力キャプチャ）を実際に使用し疎通確認済み |
+| OpenAI接続・応答 | 完了 | §11.6。実音声→STT→GPT応答を確認 |
+| Gemini接続・応答 | 完了 | §11.6。応答が短く途切れる事象を観測（Known Limitations参照） |
+| Recording | 完了 | `r`キー相当のVADBuffer既定ON状態を`s`キーで確認、Control Event疎通はPhase 3で単体検証済み |
+| Meeting Analysis | 完了 | OpenAI/Gemini双方でTyped Event経由の受信・表示を確認 |
+| Summary | **一部不備を発見** | サーバー側では生成されるがTyped Eventとして送出されずClientに届かない（Known Limitations参照）。Server責務のため本Phaseでは未修正 |
+| Keyboard UX完全一致確認 | 完了 | 実サーバー接続下で`s`/`l`/`g`/`G`/`q`の表示・挙動が既存仕様と一致することを確認 |
+| Cloud Run Deploy | **未実施（要承認）** | `gcloud auth`再認証に加え、本番インフラへの変更は実行前にユーザー確認が必須 |
+| Live Validation（本番） | **未実施** | Deploy未実施のため実施不能 |
