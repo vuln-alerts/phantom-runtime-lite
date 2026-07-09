@@ -21,6 +21,16 @@ DEFAULT_CHANNELS = 1
 DEFAULT_BLOCK_SIZE = 1600  # 100ms of audio at 16kHz mono
 DEFAULT_MAX_RECONNECT_ATTEMPTS = 3
 DEFAULT_BACKOFF_BASE_SECONDS = 1.0
+# P5-4-1: NOT the server's RMS_THRESHOLD (120) -- that value was proven
+# ineffective on real hardware (see investigation notes/report): ambient
+# room noise measured 138-530 RMS on one real external mic, i.e. already
+# above 120, so a threshold matched to the Server's default silently
+# forwarded 100% of true silence. 700 sits with margin above the
+# measured silence ceiling (max 530.2 across 7 trials / ~600+ blocks)
+# and was confirmed live against Cloud Run to suppress the repeated-
+# hallucination symptom. See runtime_client/audio_bridge.py's silence
+# gate.
+DEFAULT_SILENCE_RMS_THRESHOLD = 700
 
 
 @dataclass(frozen=True)
@@ -35,6 +45,7 @@ class ClientConfig:
     max_reconnect_attempts: int
     backoff_base_seconds: float
     manual_flush: bool
+    silence_rms_threshold: int
     tts: str
     voice: str
     rate: Optional[int]
@@ -105,6 +116,7 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
         max_reconnect_attempts=args.max_reconnect_attempts,
         backoff_base_seconds=args.backoff_base_seconds,
         manual_flush=args.manual_flush,
+        silence_rms_threshold=DEFAULT_SILENCE_RMS_THRESHOLD,
         tts=args.tts,
         voice=args.voice,
         rate=args.rate,

@@ -90,6 +90,7 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(config.max_reconnect_attempts, 3)
         self.assertEqual(config.backoff_base_seconds, 1.0)
         self.assertFalse(config.manual_flush)
+        self.assertEqual(config.silence_rms_threshold, 700)
         self.assertEqual(config.tts, "none")
         self.assertIsNone(config.input_device)
         self.assertIsNone(config.output_device)

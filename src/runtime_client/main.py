@@ -122,6 +122,7 @@ async def _amain(config: ClientConfig) -> None:
         loop=loop,
         out_queue=audio_queue,
         on_status=lambda msg: show_info(f"[audio] {msg}"),
+        silence_rms_threshold=config.silence_rms_threshold,
         on_block_sent=lambda: setattr(store, "audio_blocks_sent", store.audio_blocks_sent + 1),
     )
     bridge.start()

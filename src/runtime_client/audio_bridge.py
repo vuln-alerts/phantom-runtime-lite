@@ -7,8 +7,28 @@ WebSocket transport (asyncio) can consume captured audio without
 duplicating any of the sounddevice/InputStream lifecycle logic already
 in AudioCapture.
 
+Silence gating (P5-4-1): the pump thread is also this Client's only
+send gate. AudioCapture streams 100% of captured mic audio
+unconditionally (its rms_threshold param is accepted but never used),
+and the Server's non-manual-flush VAD route
+(phantom_runtime.py vad_loop's `_route_segment` -> `_enqueue_latest`)
+finalizes and transcribes whatever segments its own RMS_THRESHOLD
+(default 120, src/config.py) judges to contain speech. On-device
+measurement during the P5-4-1 investigation found plain room noise
+already sitting above that threshold on at least one real mic, so with
+no Client-side gate, silence gets transcribed repeatedly -- Whisper
+hallucinates a fixed phrase for near-empty audio, and it recurs every
+VAD cycle. Since Server tuning is out of scope, the fix is to never
+forward a block whose RMS falls below `silence_rms_threshold` (see
+ClientConfig.silence_rms_threshold -- no default is hardcoded in this
+module; the threshold is supplied by the caller).
+
 EXPORTED API:
   resolve_input_device(name) -- thin wrapper over audio.devices.resolve_device_id
+  block_rms(block)   -- RMS of one raw PCM16LE block; also reused by
+                         the offline measurement harness used to
+                         validate the silence gate against recorded
+                         audio (see docs/P5-4-1 investigation notes)
   AudioBridge -- owns one AudioCapture instance + the pump thread that
                  feeds its queue.Queue into an asyncio.Queue
 """
@@ -18,6 +38,8 @@ import queue
 import threading
 from typing import Callable, Optional
 
+import numpy as np
+
 from audio.capture import AudioCapture
 from audio.devices import resolve_device_id
 
@@ -26,6 +48,12 @@ def resolve_input_device(name: Optional[str]) -> Optional[int]:
     if not name:
         return None
     return resolve_device_id(name)
+
+
+def block_rms(block: np.ndarray) -> float:
+    if block.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
 
 
 class AudioBridge:
@@ -46,6 +74,7 @@ class AudioBridge:
         loop: asyncio.AbstractEventLoop,
         out_queue: "asyncio.Queue[bytes]",
         on_status: Callable[[str], None],
+        silence_rms_threshold: int,
         on_block_sent: Optional[Callable[[], None]] = None,
     ) -> None:
         self._raw_queue: "queue.Queue" = queue.Queue(maxsize=100)
@@ -66,6 +95,7 @@ class AudioBridge:
         self._loop = loop
         self._out_queue = out_queue
         self._on_status = on_status
+        self._silence_rms_threshold = silence_rms_threshold
         self._on_block_sent = on_block_sent
         self._shutdown = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
@@ -101,6 +131,9 @@ class AudioBridge:
                 block = self._raw_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+            if block_rms(block) < self._silence_rms_threshold:
+                continue  # silence -- never forwarded, so the Server's
+                          # VAD/Whisper can't repeatedly hallucinate on it
             data = block.tobytes()
             self._loop.call_soon_threadsafe(self._enqueue, data)
 
