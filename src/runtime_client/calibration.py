@@ -19,6 +19,41 @@ reporting the outcome as a CalibrationResult. CalibrationEngine takes
 an ObservationResult -- EnvironmentObserver's own output -- as its
 only input; it does not sample audio itself.
 
+Phase 4 scope (this addition -- see design doc section 6.4, section
+5.2's sequence diagram, and Implementation Plan section 3.1's
+RecalibrationController-shaped responsibilities): RecalibrationController,
+which reuses EnvironmentObserver and CalibrationEngine exactly as Phase
+1/2 built them -- no new sampling, contamination, percentile, or gate-
+derivation logic is introduced -- to run a re-calibration cycle over
+design doc section 6.4/5.2's shorter 1.5s ("1.5秒間 静寂区間を探索しつ
+つ再サンプリング") observation window instead of the initial 2.5s one,
+and to hold whichever CalibrationResult (initial or most recently
+re-calibrated) is currently active. Also exposes
+request_manual_recalibration(), the minimal API design doc FR-7's
+future 'c'-key handler will call (see Implementation Plan section
+1.2.1) -- not wired to keyboard_bridge.py/ui/keyboard.py/main.py as of
+Phase 4, per this Phase's explicit boundary.
+
+Explicitly NOT implemented in Phase 4 (do not infer these exist):
+  - FR-6's automatic drift trigger (design doc section 6.4/7/10.6:
+    "直近10秒間の Speech Gate 棄却率が...大きく乖離した場合"). The
+    design doc states this condition in prose only -- no concrete
+    threshold, formula, or window-comparison algorithm is specified
+    anywhere in either design doc. Inventing one is explicitly out of
+    scope for this Phase (confirmed instruction: no threshold not
+    already in the design doc). RecalibrationController.
+    begin_recalibration() is the extension point a future phase's
+    drift detector will call once design doc section 6.4's threshold
+    is actually specified -- until then it is only reachable via
+    request_manual_recalibration().
+  - CalibrationState / the full 8-state Runtime state machine (design
+    doc section 7) -- was already out of scope as of Phase 2/3 (see
+    below) and remains so; RecalibrationController tracks only
+    "currently recalibrating or not" and the active/last CalibrationResult,
+    not the full state machine.
+  - Any wiring into AudioBridge, main.py, keyboard_bridge.py,
+    ui/keyboard.py, websocket_client.py, or the Server.
+
 Out of scope for this module as of Phase 2 (see the Implementation
 Plan's Phase boundaries, and this Phase's own explicit exclusions --
 these are Phase 3+ and deliberately not implemented here):
@@ -67,6 +102,13 @@ EXPORTED API:
                         speech_gate (or None on failure), and the
                         sample_count/attempts carried over from the
                         ObservationResult it was derived from.
+  RecalibrationController -- (Phase 4) runs re-calibration cycles (design
+                        doc section 6.4's 1.5s window) on top of
+                        EnvironmentObserver/CalibrationEngine, holding
+                        whichever CalibrationResult is currently active
+                        and exposing request_manual_recalibration() (FR-7)
+                        plus begin_recalibration() as the trigger-agnostic
+                        entry point a future FR-6 drift detector will use.
 """
 
 from dataclasses import dataclass
@@ -113,6 +155,17 @@ DEFAULT_SPEECH_GATE_MIN = 150.0
 # design doc section 6.3: "`max=2500` は...Gate が現実的に到達不能な値
 # まで跳ね上がることを防ぐ安全上限" -- the clamp's upper bound.
 DEFAULT_SPEECH_GATE_MAX = 2500.0
+
+# design doc section 6.4 / 5.2 sequence diagram: "1.5秒間 静寂区間を探索
+# しつつ再サンプリング" -- the re-calibration observation window is
+# shorter than the initial 2.5s one (DEFAULT_WINDOW_BLOCKS above), same
+# 100ms block granularity -> ~15 samples. Distinct constant from
+# DEFAULT_WINDOW_BLOCKS because the design doc gives these two windows
+# two different lengths for two different situations (initial blocking
+# calibration vs. background re-calibration that must not interrupt
+# recording, NFR-2).
+DEFAULT_RECALIBRATION_WINDOW_SECONDS = 1.5
+DEFAULT_RECALIBRATION_WINDOW_BLOCKS = 15
 
 
 class NoiseFloorSampler:
@@ -345,3 +398,118 @@ class CalibrationEngine:
             sample_count=observation.sample_count,
             attempts=observation.attempts,
         )
+
+
+class RecalibrationController:
+    """
+    Re-calibration Controller (P5-4 Phase 4, design doc section 6.4 /
+    5.2's sequence diagram). Reuses EnvironmentObserver and
+    CalibrationEngine exactly as Phase 1/2 built them to run background
+    re-calibration cycles over a 1.5s window (DEFAULT_RECALIBRATION_WINDOW_BLOCKS,
+    shorter than the initial 2.5s calibration's DEFAULT_WINDOW_BLOCKS) --
+    no new sampling/contamination/percentile/gate-derivation algorithm
+    is introduced here, only a different window length the design doc
+    itself specifies for this situation.
+
+    Holds whichever CalibrationResult is currently active: the
+    caller-supplied initial_result until a re-calibration cycle
+    succeeds, at which point active_result becomes that cycle's result
+    (design doc section 6.4's "明確な環境変化が確認された時点で Speech
+    Gate のみを差し替える"). A cycle that finishes without success
+    (contamination exhausted every retry, mirroring EnvironmentObserver's
+    own failure mode) leaves active_result untouched -- see last_result
+    to distinguish "no cycle has run yet" from "the last cycle failed".
+
+    Exposes a single, trigger-source-agnostic entry point,
+    begin_recalibration(), for starting a new cycle. Design doc section
+    6.4 defines two distinct trigger sources for that same action:
+      - FR-7 (manual): the 'c' key -- see request_manual_recalibration()
+        below, the minimal API a future keyboard_bridge.py handler will
+        call (Implementation Plan section 1.2.1's "ctx.recalibrate_fn()
+        相当"). Not wired to any keyboard code as of Phase 4.
+      - FR-6 (automatic): a reject-rate drift detector. The design doc
+        never specifies a concrete threshold/formula for "大きく乖離した
+        場合" (see module docstring's Phase 4 scope note), so Phase 4
+        does not implement it -- begin_recalibration() is the extension
+        point a future phase's drift detector will call once that
+        threshold is defined; it is unreachable automatically until then.
+    """
+
+    def __init__(
+        self,
+        engine: CalibrationEngine,
+        initial_result: CalibrationResult,
+        window_blocks: int = DEFAULT_RECALIBRATION_WINDOW_BLOCKS,
+        contamination_threshold: float = DEFAULT_NOISE_FLOOR_SAFETY_FLOOR,
+        percentile: float = DEFAULT_PERCENTILE,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ) -> None:
+        self._engine = engine
+        self._window_blocks = window_blocks
+        self._contamination_threshold = contamination_threshold
+        self._percentile = percentile
+        self._max_attempts = max_attempts
+        self._active_result = initial_result
+        self._last_result: Optional[CalibrationResult] = None
+        self._observer: Optional[EnvironmentObserver] = None
+
+    @property
+    def active_result(self) -> CalibrationResult:
+        """The currently active CalibrationResult: initial_result until
+        a re-calibration cycle succeeds, then that cycle's result."""
+        return self._active_result
+
+    @property
+    def last_result(self) -> Optional[CalibrationResult]:
+        """The most recently completed re-calibration cycle's
+        CalibrationResult (success or failure), or None if no cycle has
+        completed yet. Distinct from active_result, which only ever
+        reflects a successful outcome."""
+        return self._last_result
+
+    @property
+    def is_recalibrating(self) -> bool:
+        """True from begin_recalibration() until the in-progress cycle's
+        window (across all its contamination retries) finishes."""
+        return self._observer is not None
+
+    def request_manual_recalibration(self) -> None:
+        """FR-7: the manual-trigger equivalent API (design doc section
+        6.4's "手動トリガー...専用キー(例: c)でいつでも明示的に要求で
+        きる"). Semantically identical to begin_recalibration() -- see
+        class docstring -- named separately so a future keyboard handler
+        has an explicit, self-describing call target."""
+        self.begin_recalibration()
+
+    def begin_recalibration(self) -> None:
+        """Starts a fresh re-calibration cycle (design doc section 6.4's
+        1.5s window). If a cycle is already in progress, it is discarded
+        and replaced -- partial samples from the old cycle are not
+        carried over, matching EnvironmentObserver's own per-attempt
+        behavior on contamination."""
+        self._observer = EnvironmentObserver(
+            window_blocks=self._window_blocks,
+            contamination_threshold=self._contamination_threshold,
+            percentile=self._percentile,
+            max_attempts=self._max_attempts,
+        )
+
+    def add_block(self, block: np.ndarray) -> None:
+        """Feed one raw audio block into the in-progress re-calibration
+        cycle. No-op if is_recalibrating is False. Once the underlying
+        EnvironmentObserver finishes (success or retry exhaustion), the
+        cycle ends: on success, active_result is replaced; on failure,
+        active_result is left as-is (see class docstring) and last_result
+        reports the failure so a caller can surface it."""
+        if self._observer is None:
+            return
+
+        self._observer.add_block(block)
+        if not self._observer.is_finished:
+            return
+
+        result = self._engine.calibrate(self._observer.result())
+        self._last_result = result
+        if result.success:
+            self._active_result = result
+        self._observer = None

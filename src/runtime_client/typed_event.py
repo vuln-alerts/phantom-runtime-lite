@@ -27,6 +27,19 @@ Deliberately out of scope for Phase 3 (see design doc section 8.5 /
 Implementation Plan's Phase 4 boundary): the "Environment Changed"
 re-calibration screen, and any actual 'c'-key re-calibration handling.
 
+P5-4 Adaptive Runtime Calibration, Phase 4 (Re-calibration) addition:
+show_environment_changed(), design doc section 8.5's fifth calibration
+screen. Same pure-renderer contract as Phase 3's four screens above --
+every number (including the before/after reject-rate percentages the
+design doc's own worked example shows as "3% -> 96%") is supplied by
+the caller, never computed here. In particular this module does not
+decide *when* to show this screen -- design doc section 6.4/7/10.6's
+FR-6 automatic drift trigger has no concrete threshold specified
+anywhere in either design doc, so deciding that is out of scope here
+just as it is for calibration.py's RecalibrationController (see that
+module's docstring). This function only renders the screen once some
+other, not-yet-implemented caller decides to show it.
+
 EXPORTED API:
   LogEntry        -- (text, lang, ts, speaker) NamedTuple, shape-compatible
                       with what ui/keyboard.py's 'l' handler expects
@@ -36,6 +49,8 @@ EXPORTED API:
   show_calibration_start/show_calibration_progress/
   show_calibration_complete/show_calibration_failed -- design doc section
                      8.1-8.4's four calibration screens (Phase 3)
+  show_environment_changed -- design doc section 8.5's re-calibration
+                     screen (Phase 4)
   TypedEventStore -- local mirror + renderer for the inbound event stream,
                      now also driving TTS playback for 'reply' events
 """
@@ -191,6 +206,42 @@ def show_calibration_failed(attempts: int, max_attempts: int, fallback_gate: flo
         f"Fallback Gate : {fallback_gate:.0f} RMS  (保守的推定・未確定)\n"
         f"この値は実測ではなく安全側のフォールバックです\n"
         f"静かな環境で 'c' を押すと再測定できます"
+    )
+
+
+# --- P5-4 Adaptive Runtime Calibration, Phase 4: Re-calibration screen
+# (design doc section 8.5) ----------------------------------------------
+# Same pure-renderer contract as Phase 3's four screens above -- see
+# module docstring's Phase 4 note. This function does not decide when
+# a re-calibration is happening or why; the caller (not implemented as
+# of Phase 4) supplies the before/after reject-rate figures and the
+# elapsed/window timing.
+
+
+def show_environment_changed(
+    previous_reject_rate: float,
+    current_reject_rate: float,
+    elapsed_seconds: float,
+    window_seconds: float,
+    bar_width: int = 10,
+) -> None:
+    """Design doc section 8.5: shown while a re-calibration cycle is in
+    progress (RecalibrationController.begin_recalibration(), see
+    calibration.py). previous_reject_rate/current_reject_rate are
+    percentages (e.g. 3.0, 96.0 for the design doc's own "3% -> 96%"
+    worked example) supplied by the caller -- this function derives
+    nothing and holds no state (Runtime Philosophy: UI is Read Only).
+    Recording continues throughout a re-calibration (design doc section
+    6.4's "録音を止めずに行う"), which this screen states explicitly."""
+    fraction = 0.0 if window_seconds <= 0 else min(elapsed_seconds / window_seconds, 1.0)
+    filled = max(0, min(bar_width, int(round(bar_width * fraction))))
+    bar = "■" * filled + "□" * (bar_width - filled)
+    _print(
+        f"\n{YELLOW}{BOLD}⟳ Environment Changed{RESET}\n"
+        f"{GRAY}直近10秒で棄却率が急上昇 ({previous_reject_rate:.0f}% -> {current_reject_rate:.0f}%){RESET}\n"
+        f"{GRAY}マイクまたは環境が変化した可能性 — 裏で再測定します{RESET}\n\n"
+        f"{GRAY}{bar} {elapsed_seconds:.1f}s / {window_seconds:.1f}s{RESET}\n"
+        f"{GRAY}録音は継続中 (発話を止める必要はありません){RESET}"
     )
 
 

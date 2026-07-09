@@ -2,9 +2,10 @@
 tests/test_runtime_client_calibration.py
 =============================================
 Unit tests for src/runtime_client/calibration.py -- Phase 1
-(Environment Observation) and Phase 2 (Calibration Engine) of P5-4
-Adaptive Runtime Calibration only. See
-docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md section 6.2/6.3 and
+(Environment Observation), Phase 2 (Calibration Engine), and Phase 4
+(Re-calibration) of P5-4 Adaptive Runtime Calibration. See
+docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md section 6.2/6.3/6.4
+and
 docs/designs/IMPLEMENTATION_PLAN_P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md
 section 3.1/6.
 
@@ -19,6 +20,16 @@ Covers:
   min clamp, normal multiplication, above max clamp), CalibrationResult
   field integrity, and end-to-end use of EnvironmentObserver's own
   result as CalibrationEngine's input.
+- RecalibrationController (Phase 4): active_result/last_result
+  bookkeeping, is_recalibrating lifecycle, the 1.5s/15-block
+  re-calibration window (design doc section 6.4/5.2), a cycle in
+  progress being discarded and replaced by a fresh begin_recalibration()
+  call, and request_manual_recalibration() being equivalent to
+  begin_recalibration(). No test here exercises an automatic drift
+  trigger -- design doc section 6.4/7/10.6's FR-6 condition has no
+  concrete threshold specified in either design doc, so Phase 4
+  deliberately does not implement or test one (see calibration.py's
+  module/class docstrings).
 
 Feeds synthetic int16 PCM blocks directly (no sounddevice/mic
 hardware, no network, no Cloud Run, no OpenAI API), consistent with
@@ -41,6 +52,8 @@ if _SRC_DIR not in sys.path:
 
 from runtime_client.calibration import (
     DEFAULT_NOISE_FLOOR_SAFETY_FLOOR,
+    DEFAULT_RECALIBRATION_WINDOW_BLOCKS,
+    DEFAULT_RECALIBRATION_WINDOW_SECONDS,
     DEFAULT_SPEECH_GATE_MAX,
     DEFAULT_SPEECH_GATE_MIN,
     DEFAULT_SPEECH_GATE_MULTIPLIER,
@@ -49,6 +62,7 @@ from runtime_client.calibration import (
     EnvironmentObserver,
     NoiseFloorSampler,
     ObservationResult,
+    RecalibrationController,
 )
 
 
@@ -330,6 +344,129 @@ class TestCalibrationEngineWithEnvironmentObserver(unittest.TestCase):
         self.assertIsNone(result.noise_floor)
         self.assertIsNone(result.speech_gate)
         self.assertEqual(result.attempts, 3)
+
+
+def _make_initial_result(speech_gate=546.0, noise_floor=182.0):
+    return CalibrationResult(
+        success=True,
+        noise_floor=noise_floor,
+        speech_gate=speech_gate,
+        sample_count=25,
+        attempts=1,
+    )
+
+
+class TestRecalibrationControllerConstants(unittest.TestCase):
+    def test_recalibration_window_matches_design_doc_section_6_4(self):
+        # design doc section 6.4 / 5.2 sequence diagram: "1.5秒間" at
+        # 100ms blocks -> 15 samples.
+        self.assertEqual(DEFAULT_RECALIBRATION_WINDOW_SECONDS, 1.5)
+        self.assertEqual(DEFAULT_RECALIBRATION_WINDOW_BLOCKS, 15)
+
+
+class TestRecalibrationControllerInitialState(unittest.TestCase):
+    def test_active_result_is_constructor_supplied_initial_result(self):
+        initial = _make_initial_result()
+        controller = RecalibrationController(CalibrationEngine(), initial)
+        self.assertIs(controller.active_result, initial)
+
+    def test_last_result_is_none_before_any_cycle(self):
+        controller = RecalibrationController(CalibrationEngine(), _make_initial_result())
+        self.assertIsNone(controller.last_result)
+
+    def test_not_recalibrating_before_begin_recalibration(self):
+        controller = RecalibrationController(CalibrationEngine(), _make_initial_result())
+        self.assertFalse(controller.is_recalibrating)
+
+    def test_add_block_is_noop_when_not_recalibrating(self):
+        initial = _make_initial_result()
+        controller = RecalibrationController(CalibrationEngine(), initial)
+        controller.add_block(_constant_block(5000))  # loud, but no cycle in progress
+        self.assertIs(controller.active_result, initial)
+        self.assertIsNone(controller.last_result)
+
+
+class TestRecalibrationControllerCycleLifecycle(unittest.TestCase):
+    def test_begin_recalibration_starts_a_cycle(self):
+        controller = RecalibrationController(
+            CalibrationEngine(), _make_initial_result(), window_blocks=3
+        )
+        controller.begin_recalibration()
+        self.assertTrue(controller.is_recalibrating)
+
+    def test_cycle_uses_default_15_block_window(self):
+        controller = RecalibrationController(CalibrationEngine(), _make_initial_result())
+        controller.begin_recalibration()
+        for _ in range(DEFAULT_RECALIBRATION_WINDOW_BLOCKS - 1):
+            controller.add_block(_constant_block(10))
+        self.assertTrue(controller.is_recalibrating)  # one block short
+        controller.add_block(_constant_block(10))
+        self.assertFalse(controller.is_recalibrating)  # window filled -> cycle ended
+
+    def test_successful_cycle_replaces_active_result(self):
+        initial = _make_initial_result(speech_gate=546.0)
+        controller = RecalibrationController(
+            CalibrationEngine(), initial, window_blocks=3, contamination_threshold=150.0
+        )
+        controller.begin_recalibration()
+        for _ in range(3):
+            controller.add_block(_constant_block(20))  # clean, quiet -> succeeds
+        self.assertFalse(controller.is_recalibrating)
+        self.assertIsNot(controller.active_result, initial)
+        self.assertTrue(controller.active_result.success)
+        self.assertAlmostEqual(controller.active_result.noise_floor, 20.0, places=6)
+        self.assertAlmostEqual(controller.active_result.speech_gate, 150.0, places=6)
+        self.assertIs(controller.last_result, controller.active_result)
+
+    def test_exhausted_cycle_leaves_active_result_untouched(self):
+        initial = _make_initial_result(speech_gate=546.0)
+        controller = RecalibrationController(
+            CalibrationEngine(),
+            initial,
+            window_blocks=1,
+            contamination_threshold=150.0,
+            max_attempts=2,
+        )
+        controller.begin_recalibration()
+        controller.add_block(_constant_block(5000))  # attempt 1: contaminated
+        self.assertTrue(controller.is_recalibrating)
+        controller.add_block(_constant_block(5000))  # attempt 2: contaminated, exhausted
+        self.assertFalse(controller.is_recalibrating)
+        self.assertIs(controller.active_result, initial)  # unchanged
+        self.assertIsNotNone(controller.last_result)
+        self.assertFalse(controller.last_result.success)
+
+    def test_begin_recalibration_while_in_progress_discards_partial_cycle(self):
+        controller = RecalibrationController(
+            CalibrationEngine(), _make_initial_result(), window_blocks=5, contamination_threshold=150.0
+        )
+        controller.begin_recalibration()
+        controller.add_block(_constant_block(10))
+        controller.add_block(_constant_block(10))  # 2/5 samples into the first cycle
+
+        controller.begin_recalibration()  # restart -- old partial samples must not carry over
+        for _ in range(4):
+            controller.add_block(_constant_block(20))
+        self.assertTrue(controller.is_recalibrating)  # only 4/5 of the *new* window
+        controller.add_block(_constant_block(20))
+        self.assertFalse(controller.is_recalibrating)
+        self.assertAlmostEqual(controller.active_result.noise_floor, 20.0, places=6)
+
+
+class TestRecalibrationControllerManualTrigger(unittest.TestCase):
+    def test_request_manual_recalibration_starts_a_cycle(self):
+        controller = RecalibrationController(CalibrationEngine(), _make_initial_result())
+        controller.request_manual_recalibration()
+        self.assertTrue(controller.is_recalibrating)
+
+    def test_request_manual_recalibration_is_equivalent_to_begin_recalibration(self):
+        controller = RecalibrationController(
+            CalibrationEngine(), _make_initial_result(), window_blocks=2, contamination_threshold=150.0
+        )
+        controller.request_manual_recalibration()
+        controller.add_block(_constant_block(30))
+        controller.add_block(_constant_block(30))
+        self.assertAlmostEqual(controller.active_result.noise_floor, 30.0, places=6)
 
 
 if __name__ == "__main__":
