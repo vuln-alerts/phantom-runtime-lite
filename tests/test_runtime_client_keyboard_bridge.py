@@ -102,7 +102,9 @@ def _run_keyboard_and_collect(commands, store=None):
     Runs the real KeyboardController (via build_keyboard_thread) against
     a scripted stdin, on a live background asyncio loop (so
     call_soon_threadsafe callbacks actually execute), and returns
-    whatever landed in the control queue plus the kb_shutdown event.
+    whatever landed in the control queue, the kb_shutdown event, and the
+    recording_active Event build_keyboard_thread returns (P5-4-2: the
+    same Event AudioBridge's send gate is wired to in main.py).
     """
     loop = asyncio.new_event_loop()
     loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -123,7 +125,9 @@ def _run_keyboard_and_collect(commands, store=None):
                 raise EOFError()
 
         with patch("builtins.input", side_effect=fake_input), patch("builtins.print"):
-            kb_thread = build_keyboard_thread(config, store, loop, control_queue, kb_shutdown)
+            kb_thread, recording_active = build_keyboard_thread(
+                config, store, loop, control_queue, kb_shutdown
+            )
             kb_thread.start()
             kb_thread.join(timeout=5)
             # 'G'/'g' dispatch their control-send via a short-lived daemon
@@ -138,7 +142,7 @@ def _run_keyboard_and_collect(commands, store=None):
             return items
 
         items = asyncio.run_coroutine_threadsafe(_drain(), loop).result(timeout=2)
-        return items, kb_shutdown
+        return items, kb_shutdown, recording_active
     finally:
         loop.call_soon_threadsafe(loop.stop)
         loop_thread.join(timeout=2)
@@ -147,33 +151,54 @@ def _run_keyboard_and_collect(commands, store=None):
 
 class TestBuildKeyboardThreadControlEvents(unittest.TestCase):
     def test_uppercase_G_sends_generate_summary(self):
-        items, _ = _run_keyboard_and_collect(["G", "q"])
+        items, _, _ = _run_keyboard_and_collect(["G", "q"])
         self.assertIn(json.dumps({"command": "generate_summary"}), items)
 
     def test_lowercase_g_sends_generate_meeting_analysis(self):
-        items, _ = _run_keyboard_and_collect(["g", "q"])
+        items, _, _ = _run_keyboard_and_collect(["g", "q"])
         self.assertIn(json.dumps({"command": "generate_meeting_analysis"}), items)
 
     def test_r_toggles_and_sends_toggle_recording(self):
         # recording_active starts set() (ON) inside build_keyboard_thread,
         # so the first 'r' clears it -- exactly one toggle_recording event.
-        items, _ = _run_keyboard_and_collect(["r", "q"])
+        items, _, _ = _run_keyboard_and_collect(["r", "q"])
         self.assertEqual(items.count(json.dumps({"command": "toggle_recording"})), 1)
 
     def test_two_r_presses_send_two_toggle_events(self):
-        items, _ = _run_keyboard_and_collect(["r", "r", "q"])
+        items, _, _ = _run_keyboard_and_collect(["r", "r", "q"])
         self.assertEqual(items.count(json.dumps({"command": "toggle_recording"})), 2)
 
     def test_q_sets_kb_shutdown_event(self):
-        _, kb_shutdown = _run_keyboard_and_collect(["q"])
+        _, kb_shutdown, _ = _run_keyboard_and_collect(["q"])
         self.assertTrue(kb_shutdown.is_set())
 
     def test_non_control_keys_do_not_touch_control_queue(self):
         # 'h'/'u'/'d'/'t' are local, no-API console actions (see
         # keyboard_bridge.py's module docstring) and must never produce
         # a Control Event.
-        items, _ = _run_keyboard_and_collect(["h", "u", "d", "t", "?", "q"])
+        items, _, _ = _run_keyboard_and_collect(["h", "u", "d", "t", "?", "q"])
         self.assertEqual(items, [])
+
+
+class TestRecordingActiveSharedWithAudioBridge(unittest.TestCase):
+    """
+    P5-4-2: build_keyboard_thread must return the *same* recording_active
+    Event its 'r' handler flips, so main.py can hand it to AudioBridge's
+    send gate -- one source of truth, not a mirrored flag that could
+    drift out of sync.
+    """
+
+    def test_recording_active_starts_on(self):
+        _, _, recording_active = _run_keyboard_and_collect(["q"])
+        self.assertTrue(recording_active.is_set())
+
+    def test_single_r_press_clears_recording_active(self):
+        _, _, recording_active = _run_keyboard_and_collect(["r", "q"])
+        self.assertFalse(recording_active.is_set())
+
+    def test_two_r_presses_restore_recording_active_on(self):
+        _, _, recording_active = _run_keyboard_and_collect(["r", "r", "q"])
+        self.assertTrue(recording_active.is_set())
 
 
 class TestSKeyStopsRealStoreTTS(unittest.TestCase):

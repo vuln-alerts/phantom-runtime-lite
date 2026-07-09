@@ -23,6 +23,21 @@ forward a block whose RMS falls below `silence_rms_threshold` (see
 ClientConfig.silence_rms_threshold -- no default is hardcoded in this
 module; the threshold is supplied by the caller).
 
+Recording gate (P5-4-2): the same pump thread also enforces the
+operator's RECORDING ON/OFF toggle ('r' key / "toggle_recording"
+Control Event). That toggle previously only notified the Server (via
+keyboard_bridge.py's NotifyingEvent -> Control Event send) -- it never
+touched this module, so audio kept being forwarded, transcribed, and
+replied to while RECORDING showed OFF. The Server's own non-manual-flush
+route (`_route_segment` -> `_enqueue_latest`) has no recording_active
+check either (only the manual-flush branch does), and Server changes
+are out of scope, so this Client-side pump is the only place able to
+enforce the toggle. `recording_active` is the *same* threading.Event
+instance keyboard_bridge.py's NotifyingEvent wraps (passed in by the
+caller, see main.py) -- not a second mirrored flag -- so there is only
+ever one source of truth for recording state and no risk of the two
+drifting out of sync.
+
 EXPORTED API:
   resolve_input_device(name) -- thin wrapper over audio.devices.resolve_device_id
   block_rms(block)   -- RMS of one raw PCM16LE block; also reused by
@@ -75,6 +90,7 @@ class AudioBridge:
         out_queue: "asyncio.Queue[bytes]",
         on_status: Callable[[str], None],
         silence_rms_threshold: int,
+        recording_active: threading.Event,
         on_block_sent: Optional[Callable[[], None]] = None,
     ) -> None:
         self._raw_queue: "queue.Queue" = queue.Queue(maxsize=100)
@@ -96,6 +112,7 @@ class AudioBridge:
         self._out_queue = out_queue
         self._on_status = on_status
         self._silence_rms_threshold = silence_rms_threshold
+        self._recording_active = recording_active
         self._on_block_sent = on_block_sent
         self._shutdown = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
@@ -131,6 +148,9 @@ class AudioBridge:
                 block = self._raw_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+            if not self._recording_active.is_set():
+                continue  # RECORDING OFF -- never forwarded, so the Server
+                          # never sees, transcribes, or replies to it
             if block_rms(block) < self._silence_rms_threshold:
                 continue  # silence -- never forwarded, so the Server's
                           # VAD/Whisper can't repeatedly hallucinate on it

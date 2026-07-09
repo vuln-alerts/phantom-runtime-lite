@@ -224,6 +224,7 @@ Legend: **C** = Client Candidate, **S** = Server Candidate. A row may carry both
 | Transcript persistence (extracted) | `src/transcript/persistence.py` (`init_session()`, `persist_entry()`, `get_session_id()`, `close_session()`) | filesystem, write lock | Appends JSONL transcript entries across threads | | ✓ | Unknown |
 | Transcript persistence (inline duplicate) | v22.py:659-696 `_persist_entry()` | same as above | Inline fallback mirroring the extracted module | | ✓ | Unknown |
 | Manual push-to-record buffering | `src/audio/vad_buffering.py` (`VADBuffer.recording_active/.flush()/.status()/.show_recording_status()`), toggled via `r` key | keyboard controller | Operator-controlled recording toggle + manual buffer flush | ✓ | ✓ | Unknown |
+| Runtime Client recording send gate | `src/runtime_client/audio_bridge.py` (`AudioBridge._run_pump()`), `src/runtime_client/keyboard_bridge.py` (`build_keyboard_thread()`'s `recording_active`), wired in `src/runtime_client/main.py` | AudioCapture, `NotifyingEvent` | Client-side enforcement of RECORDING OFF: stops forwarding captured audio to the Server the instant `r` is pressed, independent of the P5-4-1 silence gate | ✓ | | Completed (Unit Tested) — Production Verification Pending; see P5-4-2 entry §7 |
 | Debug audio recording | v22.py:696-777 `_save_debug_audio()` | filesystem | Persists raw captured audio as WAV for troubleshooting | ✓ | | Unknown |
 | Session/transcript artifacts (data) | `src/sessions/*.jsonl`, `src/backup/session_*.jsonl`, `src/backup/transcript_*.jsonl` | none | On-disk output examples, not code | | | Unknown |
 
@@ -622,3 +623,44 @@ Scope: port the SSoT's TTS provider abstraction (`_NullTTSProvider`/`_SayTTSProv
 **Not re-run this pass** (already covered honestly above, no need to repeat): production Cloud Run deploy/connectivity (still blocked on interactive `gcloud auth login`), physical Zoom listening, Gemini short-reply anomaly (unrelated to this fix, left as documented in the Phase 4 entry and RUNBOOK Known Limitations).
 
 **Result:** Summary row above moves `Completed` → `Verified`. Bug fixed with a 1-line Server change, 6 new tests added, 0 regressions (343 passed, 2 skipped), fix confirmed live end-to-end against a real local Cloud Run container. No deploy, no Cloud Run (production or otherwise) touched, per this phase's explicit constraints.
+
+### 2026-07-09 — P5-4-2: Recording OFF Send Gate
+
+**Status: Completed (Unit Tested) — Production Verification Pending.**
+
+**Scope:** fix a bug reproduced during the production Cloud Run E2E validation (P5-4-1 entry above): after pressing `r` to turn RECORDING OFF, the Runtime Client kept transmitting audio, and the Server kept running Whisper STT → LLM reply → Typed Events on it. Runtime Client only; Server untouched (explicitly out of scope for this fix).
+
+**Root Cause:** `AudioBridge._run_pump()` (`src/runtime_client/audio_bridge.py`) is the pump thread that drains `AudioCapture`'s queue and forwards blocks to the WebSocket send queue. As of P5-4-1 it had exactly one gate — the silence-RMS check. It had **no reference to `recording_active` at all**. The `recording_active` `NotifyingEvent` toggled by the `r` key lives entirely inside `keyboard_bridge.build_keyboard_thread()`, wired only to (a) the on-screen ● RECORDING / ○ IDLE status and (b) a `"toggle_recording"` Control Event sent to the Server — never to `AudioBridge`. So RECORDING OFF only ever *told* the Server; it never stopped the Client from sending. Checked the Server side too (read-only, no changes made): in the non-manual-flush path the Runtime Client actually uses (`keyboard_bridge.py` hardcodes `manual_flush_enabled=False`), `phantom_runtime.py`'s `vad_loop._route_segment()` routes straight to `_enqueue_latest()` with no `recording_active` check at all — only the manual-flush branch checks it (`phantom_runtime.py:3413-3416`). So even if the Server were in scope, it provides no backstop for this path; the Client was always the only place this could be enforced. Not queue-related, not a websocket-continues-sending defect, not Control Event timing — a gate that was simply never wired to the one thread that needed it.
+
+**Design:** `AudioBridge` gains a required `recording_active: threading.Event` constructor param; `_run_pump()` drops every block while it's clear, checked before the existing silence-RMS gate. Critically, this is the *same* `Event` instance the keyboard's `r` handler flips — `keyboard_bridge.build_keyboard_thread()` now returns `(thread, recording_active)` instead of just `thread`, and `main.py` builds the keyboard thread first (unstarted) to obtain that Event before constructing `AudioBridge`, then starts both. One source of truth; no second mirrored flag that could drift out of sync or race.
+
+Queued blocks: deliberately not drained on toggle-off. `_send_audio` (`websocket_client.py`) keeps the queue near-empty in steady state (send latency << audio block interval), so at most one already-in-flight block — one already past the pump thread's `is_set()` check at the instant OFF lands — can still reach the Server; nothing follows it, since the gate blocks every subsequent put. This is self-terminating, not an ongoing leak, and avoids reaching into `websocket_client`'s queue from the recording-toggle path, which would couple two modules whose docstrings deliberately keep them semantics-free of each other. Confirmed by `test_off_then_on_resumes_forwarding` (below): the drain observed after OFF is exactly `[]`, not a trickle.
+
+**Files Changed:** `src/runtime_client/audio_bridge.py`, `src/runtime_client/keyboard_bridge.py`, `src/runtime_client/main.py`, `tests/test_runtime_client_audio_bridge.py`, `tests/test_runtime_client_keyboard_bridge.py`.
+
+**Unit Tests:**
+- `tests/test_runtime_client_audio_bridge.py::TestRecordingGate` (6 tests): recording ON forwards loud audio; recording OFF blocks forwarding even when loud; OFF→ON resumes forwarding immediately with no leftover trickle from the OFF period; the recording gate and P5-4-1 silence gate are independent (neither substitutes for the other); `on_block_sent` does not fire while OFF.
+- `tests/test_runtime_client_keyboard_bridge.py::TestRecordingActiveSharedWithAudioBridge` (3 tests): `recording_active` starts ON; a single `r` clears it; two `r` presses restore it — confirming `build_keyboard_thread()`'s returned Event is the real one the keyboard thread drives, the same object `main.py` now hands to `AudioBridge`.
+- Existing `TestBuildKeyboardThreadControlEvents` tests updated for the new `(thread, recording_active)` return signature; no behavioral changes to those tests.
+
+**Validation Results:**
+1. `python3 -m py_compile` on all 5 changed files — clean.
+2. `python3 -m unittest tests.test_runtime_client_audio_bridge tests.test_runtime_client_keyboard_bridge -v` — **29 passed**, 0 failed.
+3. `python3 -m unittest discover -s tests -p "test_*.py" -v` (full suite) — **362 passed, 2 skipped**. The 2 skips are pre-existing, unrelated `GEMINI_API_KEY`/`OPENAI_API_KEY`-gated live-test self-skips in `test_h4_gemini_validation.py`/`test_h4_openai_validation.py` — both keys happen to be set in this environment, so their *absent-credential* skip path isn't exercised; not caused by this change. Zero regressions.
+
+These three steps constitute the "Unit Tested" portion of this entry's status. No Cloud Run environment, deployed or local, was exercised in this pass.
+
+**Remaining Limitations:**
+- **Production Cloud Run E2E has not been executed for this fix.** Step 6 of this task's requirements (RECORDING ON, OFF, ON again against the actual deployed `phantom-runtime-lite` service, confirming no transcript/reply/latency/Typed Event appears during OFF) requires a live deployed Cloud Run endpoint, authenticated `gcloud`/API credentials, and a real or looped microphone input, none of which are available in this sandboxed session (no network egress to the deployed service, no mic). This is reported as **not executed**, consistent with this project's own standard of not claiming success for validation that wasn't actually run.
+- The one-already-in-flight-block tail described under Design is an accepted, bounded behavior, not a limitation requiring further work — but it means "no additional audio blocks" should be read as "no additional blocks beyond at most one already past the gate check at the moment of toggle," not an absolute zero-byte guarantee at the exact millisecond of the keypress.
+
+**Next Step:** run the following from a machine with production access to move this entry from Completed (Unit Tested) to a state where Production Verification can be marked done:
+```
+python -m runtime_client --url https://<cloud-run-url> --provider openai
+# press 'r' (OFF) -- speak into the mic -- confirm the terminal shows
+#   no [transcript]/[reply]/[latency]/analysis output at all
+# press 'r' again (ON) -- speak -- confirm normal transcript/reply resumes
+```
+The unit-level fix (`AudioBridge` never enqueues a block while `recording_active` is clear) is what this manual pass is expected to confirm; it changes nothing about the WebSocket contract, so no other part of the P5-4-1 production validation should be at risk.
+
+**Result:** New Recording-table row above (`Runtime Client recording send gate`) added at status `Completed (Unit Tested) — Production Verification Pending`. Bug fixed with a 3-file, ~15-line Client-only change (excluding tests), 9 new tests added, 0 regressions (362 passed, 2 skipped, up from 353/2 pre-existing on this branch's `main`). This status stands until the manual production Cloud Run E2E step above is actually run, at which point this entry should be updated with those results — see Final Report for this distinction.

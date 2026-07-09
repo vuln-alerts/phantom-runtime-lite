@@ -114,6 +114,13 @@ async def _amain(config: ClientConfig) -> None:
 
     store = TypedEventStore(tts=tts, tts_interrupt_event=tts_interrupt_event)
 
+    # Built (not started) before AudioBridge so the same recording_active
+    # Event the 'r' key toggles can be handed to AudioBridge's send gate
+    # (P5-4-2) -- one source of truth, no duplicated/mirrored flag.
+    kb_thread, recording_active = build_keyboard_thread(
+        config, store, loop, control_queue, kb_shutdown
+    )
+
     bridge = AudioBridge(
         sample_rate=config.sample_rate,
         channels=config.channels,
@@ -123,11 +130,10 @@ async def _amain(config: ClientConfig) -> None:
         out_queue=audio_queue,
         on_status=lambda msg: show_info(f"[audio] {msg}"),
         silence_rms_threshold=config.silence_rms_threshold,
+        recording_active=recording_active,
         on_block_sent=lambda: setattr(store, "audio_blocks_sent", store.audio_blocks_sent + 1),
     )
     bridge.start()
-
-    kb_thread = build_keyboard_thread(config, store, loop, control_queue, kb_shutdown)
     kb_thread.start()
 
     watcher = asyncio.ensure_future(_bridge_keyboard_shutdown(kb_shutdown, stop_event))

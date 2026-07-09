@@ -1,11 +1,17 @@
 """
 tests/test_runtime_client_audio_bridge.py
 =============================================
-Unit tests for src/runtime_client/audio_bridge.py's silence gate
-(P5-4-1): block_rms() and AudioBridge._run_pump()'s decision to drop
-any block whose RMS falls below silence_rms_threshold, so the Server's
-VAD/Whisper never sees -- and can't repeatedly hallucinate on -- pure
-silence.
+Unit tests for src/runtime_client/audio_bridge.py's send gates:
+
+- Silence gate (P5-4-1): block_rms() and AudioBridge._run_pump()'s
+  decision to drop any block whose RMS falls below
+  silence_rms_threshold, so the Server's VAD/Whisper never sees -- and
+  can't repeatedly hallucinate on -- pure silence.
+- Recording gate (P5-4-2): AudioBridge._run_pump()'s decision to drop
+  every block while the caller-supplied recording_active Event is
+  clear (RECORDING OFF), so audio stops reaching the Server -- and
+  therefore STT/LLM/Typed Events -- the moment the operator toggles
+  recording off, not just the on-screen status.
 
 Feeds synthetic int16 PCM blocks directly into AudioBridge's internal
 _raw_queue (bypassing real sounddevice hardware) so this suite is
@@ -59,7 +65,10 @@ class TestBlockRms(unittest.TestCase):
         self.assertGreater(block_rms(_loud_block()), _THRESHOLD)
 
 
-def _make_bridge(loop, out_queue, silence_rms_threshold=_THRESHOLD):
+def _make_bridge(loop, out_queue, silence_rms_threshold=_THRESHOLD, recording_active=None):
+    if recording_active is None:
+        recording_active = threading.Event()
+        recording_active.set()  # ON by default, matching VADBuffer's own default
     bridge = AudioBridge(
         sample_rate=16000,
         channels=1,
@@ -69,6 +78,7 @@ def _make_bridge(loop, out_queue, silence_rms_threshold=_THRESHOLD):
         out_queue=out_queue,
         on_status=lambda msg: None,
         silence_rms_threshold=silence_rms_threshold,
+        recording_active=recording_active,
     )
     return bridge
 
@@ -144,6 +154,8 @@ class TestSilenceGate(unittest.TestCase):
 
     def test_block_sent_callback_only_fires_for_forwarded_blocks(self):
         sent_count = {"n": 0}
+        recording_active = threading.Event()
+        recording_active.set()
         bridge = AudioBridge(
             sample_rate=16000,
             channels=1,
@@ -153,6 +165,7 @@ class TestSilenceGate(unittest.TestCase):
             out_queue=self.out_queue,
             on_status=lambda msg: None,
             silence_rms_threshold=_THRESHOLD,
+            recording_active=recording_active,
             on_block_sent=lambda: sent_count.__setitem__("n", sent_count["n"] + 1),
         )
         pump = threading.Thread(target=bridge._run_pump, daemon=True)
@@ -205,6 +218,141 @@ class TestSilenceGate(unittest.TestCase):
             loose_bridge._shutdown.set()
             strict_pump.join(timeout=2)
             loose_pump.join(timeout=2)
+
+
+class TestRecordingGate(unittest.TestCase):
+    """
+    P5-4-2: AudioBridge._run_pump() must stop forwarding blocks the
+    instant recording_active is clear, and resume the instant it's set
+    again -- regardless of loudness (the recording gate and the P5-4-1
+    silence gate are independent checks).
+    """
+
+    def setUp(self):
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.loop_thread.start()
+        self.out_queue: "asyncio.Queue[bytes]" = asyncio.Queue(maxsize=100)
+
+    def tearDown(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.loop_thread.join(timeout=2)
+        self.loop.close()
+
+    def _drain_out_queue(self):
+        async def _drain():
+            items = []
+            while not self.out_queue.empty():
+                items.append(self.out_queue.get_nowait())
+            return items
+
+        return asyncio.run_coroutine_threadsafe(_drain(), self.loop).result(timeout=2)
+
+    def test_recording_on_forwards_loud_audio(self):
+        recording_active = threading.Event()
+        recording_active.set()
+        bridge = _make_bridge(self.loop, self.out_queue, recording_active=recording_active)
+        pump = threading.Thread(target=bridge._run_pump, daemon=True)
+        pump.start()
+        try:
+            block = _loud_block()
+            bridge._raw_queue.put(block)
+            time.sleep(0.3)
+            self.assertEqual(self._drain_out_queue(), [block.tobytes()])
+        finally:
+            bridge._shutdown.set()
+            pump.join(timeout=2)
+
+    def test_recording_off_blocks_forwarding_even_when_loud(self):
+        recording_active = threading.Event()  # starts clear -- OFF
+        bridge = _make_bridge(self.loop, self.out_queue, recording_active=recording_active)
+        pump = threading.Thread(target=bridge._run_pump, daemon=True)
+        pump.start()
+        try:
+            for _ in range(3):
+                bridge._raw_queue.put(_loud_block())
+            time.sleep(0.3)
+            self.assertEqual(self._drain_out_queue(), [])
+        finally:
+            bridge._shutdown.set()
+            pump.join(timeout=2)
+
+    def test_off_then_on_resumes_forwarding(self):
+        recording_active = threading.Event()
+        recording_active.set()
+        bridge = _make_bridge(self.loop, self.out_queue, recording_active=recording_active)
+        pump = threading.Thread(target=bridge._run_pump, daemon=True)
+        pump.start()
+        try:
+            # ON: forwarded.
+            first = _loud_block(amplitude=4000)
+            bridge._raw_queue.put(first)
+            time.sleep(0.2)
+            self.assertEqual(self._drain_out_queue(), [first.tobytes()])
+
+            # OFF: dropped, no matter how loud or how many.
+            recording_active.clear()
+            for _ in range(3):
+                bridge._raw_queue.put(_loud_block(amplitude=4500))
+            time.sleep(0.2)
+            self.assertEqual(self._drain_out_queue(), [])
+
+            # ON again: forwarding resumes immediately, no leftover
+            # OFF-period blocks trickle out afterwards.
+            recording_active.set()
+            last = _loud_block(amplitude=4800)
+            bridge._raw_queue.put(last)
+            time.sleep(0.2)
+            self.assertEqual(self._drain_out_queue(), [last.tobytes()])
+        finally:
+            bridge._shutdown.set()
+            pump.join(timeout=2)
+
+    def test_recording_gate_independent_of_silence_gate(self):
+        # ON + silent -> still dropped (P5-4-1 gate).
+        # OFF + loud   -> still dropped (P5-4-2 gate).
+        # Neither gate can substitute for the other.
+        recording_active = threading.Event()
+        recording_active.set()
+        bridge = _make_bridge(self.loop, self.out_queue, recording_active=recording_active)
+        pump = threading.Thread(target=bridge._run_pump, daemon=True)
+        pump.start()
+        try:
+            bridge._raw_queue.put(_silence_block())
+            recording_active.clear()
+            bridge._raw_queue.put(_loud_block())
+            time.sleep(0.3)
+            self.assertEqual(self._drain_out_queue(), [])
+        finally:
+            bridge._shutdown.set()
+            pump.join(timeout=2)
+
+    def test_block_sent_callback_does_not_fire_while_recording_off(self):
+        sent_count = {"n": 0}
+        recording_active = threading.Event()  # OFF
+        bridge = AudioBridge(
+            sample_rate=16000,
+            channels=1,
+            block_size=1600,
+            device_id=None,
+            loop=self.loop,
+            out_queue=self.out_queue,
+            on_status=lambda msg: None,
+            silence_rms_threshold=_THRESHOLD,
+            recording_active=recording_active,
+            on_block_sent=lambda: sent_count.__setitem__("n", sent_count["n"] + 1),
+        )
+        pump = threading.Thread(target=bridge._run_pump, daemon=True)
+        pump.start()
+        try:
+            for _ in range(3):
+                bridge._raw_queue.put(_loud_block())
+            time.sleep(0.3)
+            self._drain_out_queue()
+            self.assertEqual(sent_count["n"], 0)
+        finally:
+            bridge._shutdown.set()
+            pump.join(timeout=2)
 
 
 if __name__ == "__main__":

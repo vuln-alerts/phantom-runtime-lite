@@ -25,8 +25,13 @@ to replicate that branch.
 
 EXPORTED API:
   build_keyboard_thread(config, store, loop, control_queue, kb_shutdown)
-      -- returns a not-yet-started threading.Thread running
-         KeyboardController against a freshly-built RuntimeContext
+      -- returns (thread, recording_active): a not-yet-started
+         threading.Thread running KeyboardController against a
+         freshly-built RuntimeContext, and the recording_active Event
+         that thread's 'r' handler flips. Callers (see main.py) must
+         hand this same Event to AudioBridge (P5-4-2) -- it's the one
+         source of truth for RECORDING ON/OFF, not a value to be
+         duplicated.
 """
 
 import asyncio
@@ -128,12 +133,17 @@ def build_keyboard_thread(
     loop: asyncio.AbstractEventLoop,
     control_queue: "asyncio.Queue[str]",
     kb_shutdown: threading.Event,
-) -> threading.Thread:
+) -> "tuple[threading.Thread, threading.Event]":
     """
     Build (but do not start) the thread running KeyboardController
     against a Client-local RuntimeContext. kb_shutdown is set by the 'q'
     key (via ctx.shutdown_event); the caller is responsible for bridging
     that into the asyncio side's stop_event (see main.py).
+
+    Also returns the recording_active Event this thread's 'r' handler
+    toggles, so the caller can wire the exact same Event into
+    AudioBridge's send gate (P5-4-2) -- RECORDING OFF must stop audio
+    forwarding, not just notify the Server.
 
     ctx.tts / ctx.tts_interrupt_event are read directly off `store`
     (store.tts / store.tts_interrupt_event) rather than passed
@@ -210,4 +220,5 @@ def build_keyboard_thread(
     )
 
     controller = KeyboardController(ctx)
-    return threading.Thread(target=controller.run, daemon=True, name="keyboard")
+    thread = threading.Thread(target=controller.run, daemon=True, name="keyboard")
+    return thread, recording_active
