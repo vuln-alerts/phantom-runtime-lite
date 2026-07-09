@@ -5,6 +5,14 @@ Audio capture for Phantom Runtime Lite.
 
 EXPORTED API:
   AudioCapture — sounddevice InputStream lifecycle and overflow management
+
+P5-4 Adaptive Runtime Calibration, Phase 3 (Runtime UI) addition: the
+resolved input device name -- previously only ever passed to on_info()
+as a log string -- is now also kept as a plain attribute
+(resolved_device_name) so a caller can read it as a value, not just
+observe it in a log line. This is needed for the Calibration Complete
+screen's "Microphone: <name>" field (design doc section 8.3, UI-2).
+Read-only exposure only; no capture/callback behavior changes.
 """
 
 import queue
@@ -57,6 +65,10 @@ class AudioCapture:
         self._overflow_lock:  threading.Lock = threading.Lock()
         self._overflow_window: deque        = deque(maxlen=100)
 
+        # Set once run() resolves the actual device (or left as "" if no
+        # device_id was given / resolution failed) -- see module docstring.
+        self.resolved_device_name: str = ""
+
     def _audio_callback(self, indata, frames, time_info, status) -> None:
         if status:
             self._last_status = str(status)
@@ -92,6 +104,7 @@ class AudioCapture:
                 resolved_name = sd.query_devices()[self._device_id]["name"]
             except Exception:
                 resolved_name = self._device_name
+            self.resolved_device_name = resolved_name
             self._on_info(f"[audio] Input device: '{resolved_name}' -> id={self._device_id}")
         elif self._device_name:
             self._on_status(

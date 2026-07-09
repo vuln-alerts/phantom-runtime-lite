@@ -14,12 +14,28 @@ something to operate on, matching the original app's console UX.
 see tts.py) when a real TTS provider is wired in -- the speak/wait/
 interrupt loop mirrors phantom_conversational_runtime_v22.py:3167-3184.
 
+P5-4 Adaptive Runtime Calibration, Phase 3 (Runtime UI) addition: the
+four calibration screens design doc section 8.1-8.4 specify (startup /
+in-progress / complete / failed). These are pure rendering functions --
+callers pass in numbers already computed elsewhere (calibration.py's
+NoiseFloorSampler/EnvironmentObserver/CalibrationEngine, Phase 1-2);
+this module does not sample audio, derive a Speech Gate, or hold any
+calibration state of its own (Runtime Philosophy: UI is Read Only, see
+design doc's "UIはRuntimeの状態を可視化するだけです"). Not wired into
+main.py's startup sequence yet -- that wiring is Phase 5 (Integration).
+Deliberately out of scope for Phase 3 (see design doc section 8.5 /
+Implementation Plan's Phase 4 boundary): the "Environment Changed"
+re-calibration screen, and any actual 'c'-key re-calibration handling.
+
 EXPORTED API:
   LogEntry        -- (text, lang, ts, speaker) NamedTuple, shape-compatible
                       with what ui/keyboard.py's 'l' handler expects
   ANSI colors: CYAN, YELLOW, GREEN, GRAY, RESET, BOLD, WHITE
   show_info/show_warn/show_sep/show_hold/show_clarify/show_delay_en/
   show_delay_jp -- console helpers matching phantom_runtime.py's originals
+  show_calibration_start/show_calibration_progress/
+  show_calibration_complete/show_calibration_failed -- design doc section
+                     8.1-8.4's four calibration screens (Phase 3)
   TypedEventStore -- local mirror + renderer for the inbound event stream,
                      now also driving TTS playback for 'reply' events
 """
@@ -101,6 +117,81 @@ def show_agent_reply(text: str) -> None:
 
 def show_transcript(text: str, lang: str, ts: str) -> None:
     _print(f"\n{CYAN}◎ {text}{RESET}  {GRAY}[{lang}] {ts}{RESET}")
+
+
+# --- P5-4 Adaptive Runtime Calibration, Phase 3: Runtime UI (design doc
+# section 8) -----------------------------------------------------------
+# Pure renderers: every number below is supplied by the caller (Phase
+# 1-2's calibration.py), never computed here. See module docstring.
+
+_CALIBRATION_HEADER = f"{CYAN}🎤 Audio Calibration{RESET}\n{GRAY}環境ノイズを測定しています…静かにしてください{RESET}"
+
+
+def show_calibration_start(window_blocks: int) -> None:
+    """Design doc section 8.1: the very first frame shown on entry into
+    CALIBRATING, before any block has been sampled."""
+    _print(f"\n{_CALIBRATION_HEADER}\n\n{GRAY}サンプル取得中: 0/{window_blocks} blocks{RESET}")
+
+
+def show_calibration_progress(
+    sample_count: int,
+    window_blocks: int,
+    elapsed_seconds: float,
+    window_seconds: float,
+    noise_floor_estimate: Optional[float] = None,
+    bar_width: int = 10,
+) -> None:
+    """Design doc section 8.2: repeated while CALIBRATING is sampling.
+    noise_floor_estimate is the provisional (not-yet-final) p90 of
+    whatever samples have been collected so far, if the caller has one
+    to show; omitted entirely from the display when None."""
+    fraction = 0.0 if window_seconds <= 0 else min(elapsed_seconds / window_seconds, 1.0)
+    filled = max(0, min(bar_width, int(round(bar_width * fraction))))
+    bar = "■" * filled + "□" * (bar_width - filled)
+    lines = [
+        f"\n{_CALIBRATION_HEADER}",
+        "",
+        f"{GRAY}{bar} {elapsed_seconds:.1f}s / {window_seconds:.1f}s{RESET}",
+        f"{GRAY}サンプル取得中: {sample_count}/{window_blocks} blocks{RESET}",
+    ]
+    if noise_floor_estimate is not None:
+        lines.append(f"{GRAY}現在の推定 Noise Floor: {noise_floor_estimate:.0f} RMS (暫定){RESET}")
+    _print("\n".join(lines))
+
+
+def show_calibration_complete(
+    noise_floor: float,
+    speech_gate: float,
+    sample_count: int,
+    percentile: int,
+    multiplier: float,
+    microphone_name: str = "",
+) -> None:
+    """Design doc section 8.3: shown once on CALIBRATING -> CALIBRATED,
+    then normal operation ("RECORDING") begins."""
+    mic = microphone_name or "(system default)"
+    _print(
+        f"\n{GREEN}{BOLD}✓ Calibration Complete{RESET}\n\n"
+        f"Noise Floor  : {noise_floor:.0f} RMS  (p{percentile}, {sample_count} samples)\n"
+        f"Speech Gate  : {speech_gate:.0f} RMS  (floor x {multiplier:g})\n"
+        f"Microphone   : {mic}\n"
+        f"Recalibrate  : press 'c' anytime\n\n"
+        f"{GREEN}● RECORDING{RESET}  (gate: {speech_gate:.0f} RMS)"
+    )
+
+
+def show_calibration_failed(attempts: int, max_attempts: int, fallback_gate: float) -> None:
+    """Design doc section 8.4: shown on CALIBRATION_FAILED -> FALLBACK.
+    fallback_gate is the conservative estimate FALLBACK adopts -- always
+    labeled as an estimate, never presented as a measured value (design
+    doc section 9.1 / AC-10: no silent fallback)."""
+    _print(
+        f"\n{YELLOW}⚠ Calibration Incomplete{RESET}\n"
+        f"{max_attempts}回中{attempts}回、静寂区間中に音声を検出しました\n\n"
+        f"Fallback Gate : {fallback_gate:.0f} RMS  (保守的推定・未確定)\n"
+        f"この値は実測ではなく安全側のフォールバックです\n"
+        f"静かな環境で 'c' を押すと再測定できます"
+    )
 
 
 def _now_ts() -> str:

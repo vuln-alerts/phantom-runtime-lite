@@ -145,7 +145,7 @@ Scenario-2はStress Testであり、通常利用品質の検証ではない。Sc
 | --- | --- | --- |
 | Phase 1 | Environment Observation | Completed |
 | Phase 2 | Calibration Engine | Completed |
-| Phase 3 | Runtime UI | Planned |
+| Phase 3 | Runtime UI | Completed |
 | Phase 4 | Re-calibration | Planned |
 | Phase 5 | Integration | Planned |
 
