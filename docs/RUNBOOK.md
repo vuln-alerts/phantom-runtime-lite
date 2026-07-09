@@ -762,15 +762,12 @@ ws://
 - Whisper(STT)はOpenAIを利用
 - Runtimeは単一モジュール
 - Provider RoutingはSession単位
-- **[Phase 4で確認, 2026-07-09] Summary（`G`キー/`generate_summary`）はTyped Eventとして
-  送出されない。** `phantom_runtime.py`の`generate_summary()`はサーバー側コンソールに
-  結果を`_print()`するのみで`_emit_event()`を一度も呼ばない（`generate_meeting_analysis()`
-  は`_emit_event("analysis", text=result)`を呼ぶのと対照的）。実際のCloud Run環境では
-  誰もコンテナのstdoutをリアルタイムに見ないため、Runtime ClientはSummary結果を一切
-  受け取れない。ローカルDocker E2E（§11.6）で実際に確認済み。`docs/H4_RUNTIME_EVENT_CONTRACT.md`
-  の`analysis`イベントスキーマは`summary: str`フィールドを持つため、本来この経路で
-  送出される設計だったと推測される。**サーバー責務のコード変更が必要なため、この
-  Runbook更新時点では未修正。** 対応要否は要判断（Server責務のため独断で変更していない）。
+- ~~[Phase 4で確認, 2026-07-09] Summary（`G`キー/`generate_summary`）はTyped Eventとして
+  送出されない。~~ **[Phase 4-1で修正, 2026-07-09]** `phantom_runtime.py`の
+  `generate_summary()`に`_emit_event("analysis", text=summary)`を追加（`generate_meeting_analysis()`
+  と同じイベントタイプ・同じ`text`キー）。ローカルDocker E2Eで`G`キー押下後に
+  Runtime Client側へ`[分析結果]`ブロックとしてSummary内容が実際に届くことを再検証済み
+  （§11.6参照）。`docs/MIGRATION_MATRIX.md`の2026-07-09 Phase 4-1エントリに詳細。
 - **[Phase 4で確認, 2026-07-09] Geminiの応答が一部ターンで単語単位に短く途切れる**
   （例: "はい、" "今日" "サラ" "立ち"）。OpenAIでは同一入力に対しフル文の応答が返る。
   ローカルDocker E2E（§11.6）で再現。原因未特定（プロンプト/ストリーミングパース側の
@@ -819,7 +816,7 @@ ws://
 | Gemini接続・応答 | 完了 | §11.6。応答が短く途切れる事象を観測（Known Limitations参照） |
 | Recording | 完了 | `r`キー相当のVADBuffer既定ON状態を`s`キーで確認、Control Event疎通はPhase 3で単体検証済み |
 | Meeting Analysis | 完了 | OpenAI/Gemini双方でTyped Event経由の受信・表示を確認 |
-| Summary | **一部不備を発見** | サーバー側では生成されるがTyped Eventとして送出されずClientに届かない（Known Limitations参照）。Server責務のため本Phaseでは未修正 |
+| Summary | **完了（Phase 4-1で修正）** | Phase 4で発見した不備（Typed Event未送出）をPhase 4-1で修正し、`G`キー押下後にRuntime Client側で`[分析結果]`として受信・表示されることをローカルDocker E2Eで再検証済み |
 | Keyboard UX完全一致確認 | 完了 | 実サーバー接続下で`s`/`l`/`g`/`G`/`q`の表示・挙動が既存仕様と一致することを確認 |
 | Cloud Run Deploy | **未実施（要承認）** | `gcloud auth`再認証に加え、本番インフラへの変更は実行前にユーザー確認が必須 |
 | Live Validation（本番） | **未実施** | Deploy未実施のため実施不能 |

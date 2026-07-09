@@ -9026,6 +9026,7 @@ def generate_summary() -> None:
             max_tokens=500,
         ))
         summary = resp.text.strip()
+        _emit_event("analysis", text=summary)
         show_sep()
         _print(f"{BOLD}【まとめ】{RESET}\n{summary}")
         show_sep()
