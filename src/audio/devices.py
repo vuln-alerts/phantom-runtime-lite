@@ -4,7 +4,7 @@ audio/devices.py
 Audio input device resolution for Phantom Runtime Lite.
 
 EXPORTED API:
-  resolve_device_id(name)         — resolve device name substring to integer ID
+  resolve_device_id(name)         — resolve device index, or name substring, to integer ID
   print_input_devices(warn_fn)    — enumerate available input devices via warn_fn
 """
 
@@ -16,12 +16,20 @@ import sounddevice as sd
 
 def resolve_device_id(name: str) -> Optional[int]:
     """
-    Resolve a device name to an integer device index.
+    Resolve a device index or name to an integer device index.
 
+    Pass 0: numeric string, resolved by index (mirrors
+    output_device.py's resolve_output_device_id -- see PV-1 Blocker Fix:
+    prior to this, a numeric --input-device value like "1" fell through
+    to Pass 2 as a literal substring search instead of being treated as
+    an index).
     Pass 1: NFC-normalized exact match, input-only devices.
     Pass 2: case-insensitive NFC-normalized substring match, input-only devices.
     Returns None if no match found or sd.query_devices() raises.
     """
+    if name.strip().lstrip("-").isdigit():
+        return int(name.strip())
+
     name_nfc = unicodedata.normalize("NFC", name)
     try:
         devices = sd.query_devices()
