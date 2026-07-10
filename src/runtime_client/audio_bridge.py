@@ -38,6 +38,22 @@ caller, see main.py) -- not a second mirrored flag -- so there is only
 ever one source of truth for recording state and no risk of the two
 drifting out of sync.
 
+Adaptive Speech Gate (P5-4 Phase 5 Integration, design doc section 5/
+section 10.1, Implementation Plan section 1.2's audio_bridge.py row):
+the same pump thread's silence check now prefers a live
+CalibrationResult.speech_gate -- read every time a block is evaluated,
+never cached -- over the fixed `silence_rms_threshold`, when the caller
+supplies a `calibration_controller` (calibration.py's
+RecalibrationController, Phase 4, unmodified). This module does not
+import calibration.py at runtime (would create a circular import, since
+calibration.py imports block_rms from here) and does not derive a
+Speech Gate itself -- it only reads the number CalibrationEngine already
+computed (design doc section 5's "Gate導出ロジックは禁止... CalibrationEngine
+の結果のみ利用"). `calibration_controller` defaults to None, which
+preserves the exact prior behavior (the fixed `silence_rms_threshold`)
+byte-for-byte -- every pre-Phase-5 constructor call site and test is
+unaffected.
+
 EXPORTED API:
   resolve_input_device(name) -- thin wrapper over audio.devices.resolve_device_id
   block_rms(block)   -- RMS of one raw PCM16LE block; also reused by
@@ -51,12 +67,17 @@ EXPORTED API:
 import asyncio
 import queue
 import threading
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
 from audio.capture import AudioCapture
 from audio.devices import resolve_device_id
+
+if TYPE_CHECKING:
+    # Type-checking only -- see module docstring's "Adaptive Speech Gate"
+    # note on why this is not a runtime import.
+    from runtime_client.calibration import RecalibrationController
 
 
 def resolve_input_device(name: Optional[str]) -> Optional[int]:
@@ -92,6 +113,7 @@ class AudioBridge:
         silence_rms_threshold: int,
         recording_active: threading.Event,
         on_block_sent: Optional[Callable[[], None]] = None,
+        calibration_controller: Optional["RecalibrationController"] = None,
     ) -> None:
         self._raw_queue: "queue.Queue" = queue.Queue(maxsize=100)
         self._capture = AudioCapture(
@@ -114,6 +136,7 @@ class AudioBridge:
         self._silence_rms_threshold = silence_rms_threshold
         self._recording_active = recording_active
         self._on_block_sent = on_block_sent
+        self._calibration_controller = calibration_controller
         self._shutdown = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
         self._pump_thread: Optional[threading.Thread] = None
@@ -142,6 +165,21 @@ class AudioBridge:
             self._on_status(f"audio capture failed: {exc}")
             self._shutdown.set()
 
+    def _current_speech_gate(self) -> float:
+        """P5-4 Phase 5: the RMS threshold this block is checked against.
+        Live read (not cached) of calibration_controller.active_result.speech_gate
+        when a controller was supplied, per design doc section 5's
+        "AudioBridge は active_result.speech_gate を見るだけ" -- falls back
+        to the fixed silence_rms_threshold both when no controller was
+        supplied (pre-Phase-5 behavior) and in the defensive case where
+        active_result.speech_gate is None (a calibration that reported
+        failure without a caller-supplied Fallback value; see
+        calibration.py's CalibrationResult docstring)."""
+        if self._calibration_controller is None:
+            return self._silence_rms_threshold
+        gate = self._calibration_controller.active_result.speech_gate
+        return gate if gate is not None else self._silence_rms_threshold
+
     def _run_pump(self) -> None:
         while not self._shutdown.is_set():
             try:
@@ -151,7 +189,7 @@ class AudioBridge:
             if not self._recording_active.is_set():
                 continue  # RECORDING OFF -- never forwarded, so the Server
                           # never sees, transcribes, or replies to it
-            if block_rms(block) < self._silence_rms_threshold:
+            if block_rms(block) < self._current_speech_gate():
                 continue  # silence -- never forwarded, so the Server's
                           # VAD/Whisper can't repeatedly hallucinate on it
             data = block.tobytes()

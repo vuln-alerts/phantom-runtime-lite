@@ -111,6 +111,7 @@ EXPORTED API:
                         entry point a future FR-6 drift detector will use.
 """
 
+import os
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -118,6 +119,32 @@ import numpy as np
 
 # Historical placement, not a design endorsement -- see module docstring above.
 from runtime_client.audio_bridge import block_rms
+from runtime_client import debug_sink
+
+# ---------------------------------------------------------------------------
+# Production Verification investigation instrumentation (TEMPORARY).
+#
+# Added to trace why Adaptive Runtime Calibration's Startup Calibration is
+# reportedly always Calibration Failed on Production Verification while all
+# 429 unit tests pass -- see investigation notes. Not part of the
+# calibration algorithm: inert unless PHANTOM_CALIBRATION_DEBUG=1 is set,
+# so default behavior (including every existing test) is unchanged.
+#
+# Deliberately funneled through this single helper (matching the existing
+# show_info()/show_warn()/_print() display convention -- see main.py -- not
+# the stdlib `logging` module) so every call site this investigation adds
+# can be found with `grep -rn PHANTOM_CALIBRATION_DEBUG` and deleted
+# together, along with this function, once the root cause is found.
+#
+# Also tees to debug_sink's session log file (Production Verification
+# Support: --production-verification, see main.py) when one is open --
+# stdout output/gating is otherwise identical to before that addition.
+# ---------------------------------------------------------------------------
+def _debug_log(message: str) -> None:
+    if os.getenv("PHANTOM_CALIBRATION_DEBUG") == "1":
+        line = f"[calibration-debug] {message}"
+        print(line, flush=True)
+        debug_sink.write(line)
 
 # design doc section 6.2: 2.5s observation window, 100ms blocks -> ~25 samples
 DEFAULT_WINDOW_BLOCKS = 25
@@ -202,9 +229,23 @@ class NoiseFloorSampler:
         if self.is_complete:
             return
         rms = block_rms(block)
-        if rms >= self._contamination_threshold:
+        contaminated_this_block = rms >= self._contamination_threshold
+        if contaminated_this_block:
             self._contaminated = True
         self._samples.append(rms)
+
+        _debug_log(
+            f"Block {len(self._samples):02d} RMS={rms:.1f}"
+            + (" -> contamination" if contaminated_this_block else "")
+        )
+        if self.is_complete:
+            _debug_log(
+                f"Window end: sample_count={len(self._samples)} "
+                f"min={min(self._samples):.1f} max={max(self._samples):.1f} "
+                f"percentile_target={self._percentile} "
+                f"contaminated={self._contaminated} "
+                f"noise_floor={self.noise_floor()}"
+            )
 
     @property
     def is_complete(self) -> bool:
@@ -274,6 +315,7 @@ class EnvironmentObserver:
         self._attempt = 1
         self._sampler = self._new_sampler()
         self._result: Optional[ObservationResult] = None
+        _debug_log(f"Attempt {self._attempt} started")
 
     def _new_sampler(self) -> NoiseFloorSampler:
         return NoiseFloorSampler(
@@ -309,6 +351,11 @@ class EnvironmentObserver:
                 sample_count=self._sampler.sample_count,
                 attempts=self._attempt,
             )
+            _debug_log(
+                f"Attempt {self._attempt}: window clean -> ObservationResult "
+                f"success=True noise_floor={self._result.noise_floor} "
+                f"sample_count={self._result.sample_count} attempts={self._result.attempts}"
+            )
             return
 
         if self._attempt >= self._max_attempts:
@@ -318,10 +365,17 @@ class EnvironmentObserver:
                 sample_count=self._sampler.sample_count,
                 attempts=self._attempt,
             )
+            _debug_log(
+                f"Attempt {self._attempt}: window contaminated, max_attempts="
+                f"{self._max_attempts} reached -> ObservationResult success=False "
+                f"sample_count={self._result.sample_count} attempts={self._result.attempts}"
+            )
             return
 
+        _debug_log(f"Attempt {self._attempt}: window contaminated -> retrying")
         self._attempt += 1
         self._sampler = self._new_sampler()
+        _debug_log(f"Attempt {self._attempt} started")
 
     def result(self) -> Optional[ObservationResult]:
         """None until is_finished is True, then the final outcome."""
@@ -382,7 +436,17 @@ class CalibrationEngine:
         the calibration fails too -- there is no noise_floor to derive
         a speech_gate from.
         """
+        _debug_log(
+            f"CalibrationEngine input: success={observation.success} "
+            f"noise_floor={observation.noise_floor} "
+            f"sample_count={observation.sample_count} attempts={observation.attempts}"
+        )
+
         if not observation.success or observation.noise_floor is None:
+            _debug_log(
+                "CalibrationEngine result: success=False "
+                "(observation failed or noise_floor is None -- nothing to derive gate from)"
+            )
             return CalibrationResult(
                 success=False,
                 noise_floor=None,
@@ -391,13 +455,18 @@ class CalibrationEngine:
                 attempts=observation.attempts,
             )
 
-        return CalibrationResult(
+        result = CalibrationResult(
             success=True,
             noise_floor=observation.noise_floor,
             speech_gate=self._derive_speech_gate(observation.noise_floor),
             sample_count=observation.sample_count,
             attempts=observation.attempts,
         )
+        _debug_log(
+            f"CalibrationEngine result: success=True "
+            f"noise_floor={result.noise_floor} speech_gate={result.speech_gate}"
+        )
+        return result
 
 
 class RecalibrationController:

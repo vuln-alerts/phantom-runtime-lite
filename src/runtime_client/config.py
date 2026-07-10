@@ -52,6 +52,14 @@ class ClientConfig:
     volume: float
     list_devices: bool = False
     list_output_devices: bool = False
+    # Production Verification investigation support (TEMPORARY -- see
+    # runtime_client/debug_sink.py's module docstring). Does not alter
+    # calibration behavior; only auto-enables the existing
+    # PHANTOM_CALIBRATION_DEBUG=1 debug instrumentation and tees it to a
+    # session log file, plus a post-calibration summary file. Defaulted
+    # to False, at the end of the dataclass, so it is purely additive --
+    # every existing ClientConfig(...) construction keeps working.
+    production_verification: bool = False
 
 
 def build_ws_url(url: str, provider: str) -> str:
@@ -85,6 +93,17 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
     parser.add_argument("--output-device", default=None, help="Output device name (substring match) or index, for TTS playback (Phase 3); default: system default output")
     parser.add_argument("--list-devices", action="store_true", help="List available input devices and exit")
     parser.add_argument("--list-output-devices", action="store_true", help="List available output devices and exit")
+    parser.add_argument(
+        "--production-verification",
+        action="store_true",
+        help=(
+            "Production Verification investigation support (temporary): "
+            "auto-enables PHANTOM_CALIBRATION_DEBUG=1-equivalent Calibration "
+            "Debug output, tees it to logs/calibration_<timestamp>.log, and "
+            "writes logs/root_cause_summary.txt after Startup Calibration "
+            "finishes. Normal startup/behavior is otherwise unchanged."
+        ),
+    )
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE, help="Frames per audio block sent per WebSocket message")
     parser.add_argument("--max-reconnect-attempts", type=int, default=DEFAULT_MAX_RECONNECT_ATTEMPTS)
@@ -123,4 +142,5 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
         volume=args.volume,
         list_devices=args.list_devices,
         list_output_devices=args.list_output_devices,
+        production_verification=args.production_verification,
     )

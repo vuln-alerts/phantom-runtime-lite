@@ -763,3 +763,45 @@ The unit-level fix (`AudioBridge` never enqueues a block while `recording_active
 **Next Step:** Phase 5 (Integration, design doc §5/Implementation Plan §2) is next per the Implementation Plan's ordering — wiring `RecalibrationController` and the calibration screens into `main.py`'s startup sequence and `AudioBridge._run_pump()`'s live Speech Gate. FR-6's automatic drift trigger remains unimplemented pending a design decision on its concrete threshold — not a Phase 5 blocker for the rest of Integration, but called out here so it isn't silently assumed done. Not started in this pass.
 
 **Result:** New row above (`Adaptive Runtime Calibration — Re-calibration Controller`) added to the Recording table at status `Completed (Unit Tested) — Production Verification Pending`. 15 new tests added across the two test files (12 in `test_runtime_client_calibration.py`, 3 in `test_runtime_client_calibration_ui.py`), 0 regressions (413 tests run, 412 passed, 1 error — pre-existing/unrelated, see above — 2 skipped; up from 398 tests run at the pre-Phase-4 commit in this same environment). This status stands until a live-audio pass actually exercises a re-calibration cycle against a real running Calibration session, at which point this entry should be updated with those results.
+
+### 2026-07-10 — P5-4 Adaptive Runtime Calibration, Phase 5: Integration
+
+**Status: Completed (Unit Tested) — Production Verification Pending.**
+
+**Scope:** Phase 5 (Integration) of `docs/designs/P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md`, per `docs/designs/IMPLEMENTATION_PLAN_P5_4_ADAPTIVE_RUNTIME_CALIBRATION.md` §2's Phase ordering. Implementation target: startup calibration, `AudioBridge` integration, `RecalibrationController` wiring.
+
+**Implemented:**
+- Startup calibration implemented in `main.py` (`_perform_startup_calibration()`, `_run_initial_calibration()`, `_build_fallback_calibration_result()`).
+- `EnvironmentObserver` / `CalibrationEngine` (Phase 1/2) reused as-is — unmodified.
+- Phase 3 Runtime UI (`show_calibration_start`/`show_calibration_progress`/`show_calibration_complete`/`show_calibration_failed`) reused as-is — unmodified.
+- On successful calibration, the resulting `CalibrationResult` is used directly.
+- On calibration failure, `config.silence_rms_threshold` is used as the Fallback Gate.
+- `RecalibrationController` (Phase 4) is constructed from the initial `CalibrationResult`.
+- `AudioBridge` is given the `RecalibrationController` via a new `calibration_controller` constructor argument.
+- `AudioBridge` reads `active_result.speech_gate` once per block — nothing more.
+- No Gate-derivation logic was added to `AudioBridge`.
+- When `calibration_controller` is `None`, `AudioBridge` uses `silence_rms_threshold` as before.
+
+**Files Changed:** `src/runtime_client/audio_bridge.py`, `src/runtime_client/main.py`, `tests/test_runtime_client_audio_bridge.py`, `tests/test_runtime_client_main.py`. No other file changed.
+
+**Unit Tests:**
+- `tests/test_runtime_client_audio_bridge.py` — new `TestAdaptiveSpeechGate` class (**5 new tests**): gate is read from `calibration_controller.active_result.speech_gate` rather than the static threshold; a block above the controller's gate is forwarded; no controller supplied preserves the pre-Phase-5 static-threshold behavior; the gate updates live after a successful re-calibration cycle; a `speech_gate=None` on `active_result` falls back to the static threshold. File total: **19 tests** (14 pre-existing + 5 new).
+- `tests/test_runtime_client_main.py` (new file, **6 tests**): `TestRunInitialCalibration` (5 tests — succeeds on a clean window; retries after contamination then succeeds; exhausts retries and reports failure; `shutdown` stops the loop before completion; renders the start/progress screens) and `TestBuildFallbackCalibrationResult` (1 test — fields reflect the fallback inputs, not a measurement).
+
+**Validation Results:**
+1. `python3 -m py_compile` on all changed/related `runtime_client`/`ui`/`audio` files — clean.
+2. `python3 -m unittest tests.test_runtime_client_audio_bridge -v` — **19 passed**, 0 failed.
+3. `python3 -m unittest tests.test_runtime_client_main -v` — **6 passed**, 0 failed.
+4. `python3 -m unittest discover -s tests -p "test_*.py"` (full suite) — **Ran 429 tests. OK (skipped=2)**. The 2 skips are the same pre-existing `GEMINI_API_KEY`/`OPENAI_API_KEY`-gated live-test self-skips noted in the Phase 2-4 entries above, unrelated to this change.
+5. No Cloud Run environment (deployed or local), no OpenAI API, no Gemini API, and no real microphone were used in this pass, per this task's explicit constraints.
+
+**Backward Compatibility:** `AudioBridge.__init__` is changed only by the addition of the optional `calibration_controller` argument — every existing argument and existing behavior is unchanged. When `calibration_controller=None`, `AudioBridge` behaves exactly as before this pass. `calibration.py`, `keyboard_bridge.py`, `ui/keyboard.py`, `config.py`, and every Server module are all unmodified.
+
+**Known Deviations:**
+- **FR-7 (manual re-calibration): not implemented.** Reason: design doc §6.4's stated key (`'c'`) already has an unrelated, existing binding in `ui/keyboard.py` ("clear transcript log"); `ui/keyboard.py` is out of scope for this pass; `request_manual_recalibration()` (Phase 4) exists but is not connected to any input in this pass.
+- **FR-6 (automatic drift detection): not implemented.** Reason: the design doc only states "棄却率が大きく乖離した場合" in prose — no concrete threshold, percentage, or formula is specified anywhere in either design doc. No threshold was invented to fill that gap.
+- **WebSocket Ordering: this pass runs Calibration before the WebSocket connection, not after.** The design doc's sequence is WebSocket connection → Calibration. This pass's actual order is Calibration → WebSocket connection. Reason: `websocket_client.py` is out of scope for this pass, and preserving the design doc's literal ordering would require changing it; running Calibration first was the design decision made to implement Phase 5 without touching that out-of-scope file.
+
+**Next Step:** Phase 5's next step is **Production Verification** — end-to-end verification with a real microphone, a real `AudioBridge`, a real WebSocket connection, and a real Cloud Run Runtime. Not performed in this pass.
+
+**Result:** This entry records Phase 5 Integration wiring on top of the three rows already present in the Recording table above (Calibration Engine, Runtime UI, Re-calibration Controller); those rows' own "Not yet wired..." phrasing predates this entry and is not edited here, per this pass's documentation-only, listed-file scope. 11 new tests added across the two test files (5 in `test_runtime_client_audio_bridge.py`, 6 in `test_runtime_client_main.py` (new)), 0 regressions (429 tests run, OK, skipped=2; up from 413 tests run at the pre-Phase-5 commit). This status stands until a Production Verification pass actually exercises the wired startup calibration → AudioBridge → WebSocket flow end-to-end, at which point this entry should be updated with those results.

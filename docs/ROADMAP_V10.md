@@ -147,6 +147,6 @@ Scenario-2はStress Testであり、通常利用品質の検証ではない。Sc
 | Phase 2 | Calibration Engine | Completed |
 | Phase 3 | Runtime UI | Completed |
 | Phase 4 | Re-calibration | Completed |
-| Phase 5 | Integration | Planned |
+| Phase 5 | Integration | Completed |
 
 Source: `docs/MIGRATION_MATRIX.md` §7 Validation Log, 2026-07-10 entry.
