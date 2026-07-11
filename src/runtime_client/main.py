@@ -102,6 +102,7 @@ from runtime_client.typed_event import (
     show_warn,
 )
 from runtime_client.websocket_client import RuntimeWebSocketClient
+import runtime_trace
 
 
 def _print(message: str) -> None:
@@ -154,6 +155,30 @@ async def _bridge_keyboard_shutdown(kb_shutdown, stop_event: asyncio.Event) -> N
             stop_event.set()
             return
         await asyncio.sleep(0.1)
+
+
+async def _trace_snapshot_loop(
+    client: "RuntimeWebSocketClient", store: TypedEventStore, stop_event: asyncio.Event,
+) -> None:
+    """Debug-only, periodic 'PIPELINE STATE SNAPSHOT' trace line for the
+    Runtime Pipeline stall investigation (see runtime_trace.py). No-op
+    unless PHANTOM_TRACE=1. Does not affect client behavior."""
+    if not runtime_trace.enabled():
+        return
+    while not stop_event.is_set():
+        with store.log_lock:
+            conv_lines = len(store.transcript_log)
+        runtime_trace.emit(
+            "PIPELINE STATE SNAPSHOT",
+            event_id=runtime_trace.next_event_id("cli-snapshot"),
+            ws_state=client.get_state(),
+            audio_blocks_sent=store.audio_blocks_sent,
+            client_conversation_lines=conv_lines,
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            pass
 
 
 def _build_fallback_calibration_result(
@@ -626,10 +651,13 @@ async def _amain(config: ClientConfig) -> None:
         backoff_base_seconds=config.backoff_base_seconds,
     )
 
+    snapshot_task = asyncio.ensure_future(_trace_snapshot_loop(client, store, stop_event))
+
     try:
         await client.run(audio_queue, control_queue, stop_event, store.handle_line)
     finally:
         watcher.cancel()
+        snapshot_task.cancel()
         bridge.stop()
         tts.stop()
 

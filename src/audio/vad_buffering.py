@@ -22,6 +22,8 @@ from typing import Callable, List, Optional
 
 import numpy as np
 
+import runtime_trace
+
 
 class VADBuffer:
     """
@@ -98,6 +100,7 @@ class VADBuffer:
         self._silence_streak: int   = 0
         self._has_speech:     bool  = False
         self._pre_buf:        deque = deque(maxlen=pre_buffer_blocks)
+        self._trace_segment_id: Optional[str] = None
 
     # ── Manual buffer operations ──────────────────────────────────────────────
 
@@ -245,6 +248,9 @@ class VADBuffer:
                 self._blocks.extend(self._pre_buf)
                 self._total_samples += sum(len(b) for b in self._pre_buf)
                 self._pre_buf.clear()
+            if not self._has_speech and runtime_trace.enabled():
+                self._trace_segment_id = runtime_trace.next_event_id("vad-seg")
+                runtime_trace.emit("VAD START", event_id=self._trace_segment_id)
             self._has_speech     = True
             self._silence_streak = 0
 
@@ -263,6 +269,7 @@ class VADBuffer:
 
         chunk_had_speech = self._has_speech
         audio            = np.concatenate(self._blocks)
+        segment_id       = self._trace_segment_id
 
         if force_flush:
             flush_reason = "force"
@@ -276,9 +283,53 @@ class VADBuffer:
         self._reset_inline()
 
         if not chunk_had_speech:
+            if runtime_trace.enabled() and segment_id is not None:
+                runtime_trace.emit(
+                    "VAD FLUSH", event_id=segment_id,
+                    reason=flush_reason, discarded=True,
+                )
             return None
 
+        if runtime_trace.enabled():
+            runtime_trace.emit(
+                "VAD FLUSH", event_id=segment_id,
+                reason=flush_reason, dur_sec=round(len(audio) / self._sample_rate, 2),
+            )
         self._info_fn(f"[seg] finalized reason={flush_reason} dur={len(audio)/self._sample_rate:.2f}s")
+        return audio
+
+    def check_idle_timeout(self, idle_sec: float, silence_timeout_sec: float) -> Optional[np.ndarray]:
+        """
+        Wall-clock counterpart to process_frame's frame-count-based silence_streak.
+
+        Client Speech Gate (runtime_client/audio_bridge.py) never forwards a
+        block while the caller is silent, so no block -- silent or not -- ever
+        reaches this Server VAD during silence. process_frame's silence_streak
+        therefore never advances and silence_flush is unreachable; every
+        segment ends via force_flush at max_samples instead. This method lets
+        the caller (VADOrchestrator.run, on its queue.get timeout) report how
+        long it has been since the last block actually arrived; once that
+        idle time clears silence_timeout_sec, the in-progress speech segment
+        is finalized as reason=silence exactly as process_frame's silence_flush
+        branch would have, without needing a synthetic silent frame.
+        """
+        if not self._has_speech or not self._blocks:
+            return None
+        if idle_sec < silence_timeout_sec:
+            return None
+        if self._total_samples < self._min_samples:
+            return None
+
+        audio      = np.concatenate(self._blocks)
+        segment_id = self._trace_segment_id
+        self._reset_inline()
+
+        if runtime_trace.enabled():
+            runtime_trace.emit(
+                "VAD FLUSH", event_id=segment_id,
+                reason="silence", dur_sec=round(len(audio) / self._sample_rate, 2),
+            )
+        self._info_fn(f"[seg] finalized reason=silence dur={len(audio)/self._sample_rate:.2f}s")
         return audio
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -290,3 +341,4 @@ class VADBuffer:
         self._silence_streak = 0
         self._has_speech     = False
         self._pre_buf.clear()
+        self._trace_segment_id = None

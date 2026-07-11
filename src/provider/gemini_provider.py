@@ -60,7 +60,13 @@ from typing import Any, Iterator, Optional
 import httpx
 from google.genai import Client
 from google.genai.errors import APIError
-from google.genai.types import Content, GenerateContentConfig, HttpOptions, Part
+from google.genai.types import (
+    Content,
+    GenerateContentConfig,
+    HttpOptions,
+    Part,
+    ThinkingConfig,
+)
 
 from provider.errors import (
     RuntimeAuthenticationError,
@@ -295,6 +301,28 @@ class GeminiProvider(ProviderInterface):
             system_instruction=system_instruction,
             temperature=request.temperature,
             max_output_tokens=request.max_tokens,
+            # thinking_budget=0 disables gemini-2.5-flash's default dynamic
+            # "thinking" (internal reasoning tokens the model spends before
+            # emitting visible output -- see google.genai.types.ThinkingConfig
+            # docstring: "The default values and allowed ranges are model
+            # dependent"). Left unset (the prior behavior), the model's own
+            # default thinking budget is drawn from the SAME max_output_tokens
+            # ceiling request.max_tokens supplies here -- and that ceiling
+            # (60-150, see phantom_runtime.py generate_reply()'s max_tok) was
+            # sized for a plain conversational reply, not for a reasoning
+            # model's hidden token spend. Confirmed via direct google-genai
+            # calls: with thinking enabled and max_output_tokens=60, a
+            # one-sentence Japanese answer was truncated to 2 visible
+            # characters (thoughts_token_count=54 of the 60-token budget,
+            # finish_reason=MAX_TOKENS) on every repeated call; with
+            # thinking_budget=0, the same prompt returns the full sentence
+            # (finish_reason=STOP, thoughts_token_count=None) and is faster,
+            # not slower. This task's real-time conversational reply
+            # (generate()/generate_stream(), max_tok=60-150) has no use for
+            # multi-step reasoning, so thinking is disabled unconditionally
+            # here rather than raising the token ceiling (which would still
+            # not guarantee visible output, since the budget is dynamic).
+            thinking_config=ThinkingConfig(thinking_budget=0),
         )
         return contents, config
 

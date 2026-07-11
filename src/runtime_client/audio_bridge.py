@@ -76,6 +76,7 @@ import numpy as np
 from audio.capture import AudioCapture
 from audio.devices import resolve_device_id
 from runtime_client import debug_sink
+import runtime_trace
 
 if TYPE_CHECKING:
     # Type-checking only -- see module docstring's "Adaptive Speech Gate"
@@ -233,6 +234,9 @@ class AudioBridge:
                 block = self._raw_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+            _trace_id = runtime_trace.next_event_id("blk") if runtime_trace.enabled() else ""
+            if runtime_trace.enabled():
+                runtime_trace.emit("Audio Received", event_id=_trace_id)
             if not self._recording_active.is_set():
                 continue  # RECORDING OFF -- never forwarded, so the Server
                           # never sees, transcribes, or replies to it
@@ -251,6 +255,8 @@ class AudioBridge:
                 if rms < gate:
                     continue  # silence -- never forwarded, so the Server's
                               # VAD/Whisper can't repeatedly hallucinate on it
+            if runtime_trace.enabled():
+                runtime_trace.emit("Speech Gate PASS", event_id=_trace_id, rms=rms)
             data = block.tobytes()
             self._loop.call_soon_threadsafe(self._enqueue, data)
 

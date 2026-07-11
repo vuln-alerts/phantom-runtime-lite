@@ -77,12 +77,31 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request
 
 from runtime.provider_router import ProviderRejected, select_provider_from_query
+import runtime_trace
 
 HEALTH_PATHS = ("/healthz", "/")
 WS_PATH      = "/ws"
 
 _PIPE_READ_CHUNK_SIZE = 65536
 _EVENT_QUEUE_MAXSIZE  = 1000
+
+# Per-connection Session Lifecycle, traced via runtime_trace (debug-only)
+# so a future stall is visible at a glance in the trace log: which
+# session got stuck, and at which stage. CONNECTED -> DISCONNECTING is
+# entered the instant the relay loop exits (any reason); DISCONNECTING
+# -> TEARDOWN is entered only after this loop-owned thread has already
+# released _active_connection/_active_session (see _handler's finally
+# block) -- so by the time TEARDOWN starts, the single-session slot is
+# already free for a new connection, regardless of how long TEARDOWN
+# itself (child process shutdown) takes. TEARDOWN -> CLOSED is entered
+# once RuntimeSession.teardown() returns, on the background thread (see
+# _finish_disconnect). Exactly one _handler() coroutine ever exists per
+# connection and its try/finally runs exactly once, so this sequence
+# cannot double-fire for the same connection.
+_SESSION_STATE_CONNECTED     = "CONNECTED"
+_SESSION_STATE_DISCONNECTING = "DISCONNECTING"
+_SESSION_STATE_TEARDOWN      = "TEARDOWN"
+_SESSION_STATE_CLOSED        = "CLOSED"
 
 
 def _log(message: str) -> None:
@@ -216,6 +235,12 @@ class TransportGateway:
     # ── WS path: /ws — one session per connection ───────────────────────────
 
     async def _handler(self, websocket: ServerConnection) -> None:
+        # Fetched unconditionally, before any code that could raise, so
+        # it is always available to the finally block below regardless
+        # of where in this coroutine things fail -- _handler only ever
+        # runs as a task on the gateway's own loop, so this is always
+        # the same loop _run()/_serve() created.
+        loop = asyncio.get_running_loop()
         _, _, query = websocket.request.path.partition("?")
         try:
             provider = select_provider_from_query(query)
@@ -257,12 +282,28 @@ class TransportGateway:
         reader_thread: Optional[threading.Thread] = None
         reader_stop = threading.Event()
         drain_task: "Optional[asyncio.Task]" = None
+        # Ties this connection's trace lines to the same session id the
+        # spawned Runtime child tags its own trace lines with (its pid) --
+        # see runtime_trace.py's module docstring. Debug-only. Falls back
+        # to id(session) for session stand-ins without a real child
+        # process (e.g. test doubles), which have no pid of their own.
+        _child = getattr(session, "child", None)
+        _trace_session_id = f"srv-{getattr(_child, 'pid', id(session))}"
         try:
             with self._active_lock:
                 self._active_session = session
             _log(f"client connected (provider={provider})")
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "Session START", session_id=_trace_session_id,
+                    event_id="session-start", provider=provider,
+                    lifecycle_state=_SESSION_STATE_CONNECTED,
+                )
+                runtime_trace.emit(
+                    "WebSocket RECEIVE", session_id=_trace_session_id,
+                    event_id="connect", provider=provider,
+                )
 
-            loop = asyncio.get_running_loop()
             event_queue: "asyncio.Queue[str]" = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
             reader_thread = threading.Thread(
                 target=self._pump_events_from_pipe,
@@ -288,28 +329,145 @@ class TransportGateway:
                     except OSError:
                         break  # session's control pipe gone (e.g. child already exited)
                     continue
+                if runtime_trace.enabled():
+                    runtime_trace.emit(
+                        "WebSocket RECEIVE", session_id=_trace_session_id,
+                        event_id=runtime_trace.next_event_id("ws-recv"),
+                        nbytes=len(message),
+                    )
                 try:
                     await loop.run_in_executor(
                         None, os.write, session.audio_fd_w, message
                     )
                 except OSError:
                     break  # session's audio pipe gone (e.g. child already exited)
-        except ConnectionClosed:
-            pass
+        except ConnectionClosed as exc:
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "WebSocket RECEIVE", session_id=_trace_session_id,
+                    event_id="connection_closed", exception=str(exc),
+                )
         finally:
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "Session DISCONNECT", session_id=_trace_session_id,
+                    event_id="session-disconnect",
+                    lifecycle_state=_SESSION_STATE_DISCONNECTING,
+                )
             if drain_task is not None:
                 drain_task.cancel()
-            if reader_thread is not None:
-                reader_stop.set()
-                reader_thread.join(timeout=2.0)
+
+            # Shared TransportGateway state (_active_connection /
+            # _active_session, guarded by _active_lock) is claimed and
+            # released ONLY here, on the gateway's own event-loop thread
+            # -- never from the background thread this finally block
+            # hands off to below. That is what keeps the single-session
+            # slot's state machine race-free: by the time a reconnect's
+            # _process_request/_handler can observe this slot as free,
+            # it really is free, regardless of how long this session's
+            # own child-process shutdown (below) still takes.
             with self._active_lock:
                 if self._active_connection is websocket:
                     self._active_connection = None
                 self._active_session = None
-            # Idempotent: safe even if a concurrent SIGTERM-driven shutdown
-            # (see runtime.cloud_run_shell) already tore this session down.
-            self._session_teardown(session)
             _log("client disconnected")
+
+            # reader_thread.join() and session_teardown() (SIGINT ->
+            # subprocess.wait(SHUTDOWN_GRACE_SECONDS) -> SIGKILL ->
+            # subprocess.wait(_KILL_WAIT_SECONDS), see cloud_run_shell.
+            # RuntimeSession.teardown()) are blocking, multi-second
+            # operations. This Shell serves every connection -- /healthz
+            # and every /ws session -- on the ONE asyncio event loop this
+            # coroutine is itself running on (see _run()/_serve()); a
+            # thread.join()/subprocess.wait() called directly here would
+            # stall that loop, and therefore this process's Ping/Pong
+            # keepalive handling and every other connection's handshake
+            # processing, for the entire blocking duration. That stall is
+            # exactly how one session's ordinary disconnect used to turn
+            # into an unrelated reconnect being rejected with 409: while
+            # the loop was frozen inside this call, a client's own
+            # keepalive could time out (server not responding to Ping ->
+            # close 1011) and, separately, a stale/already-abandoned
+            # connection attempt could be the first thing the loop
+            # processes once it unfreezes, claiming the just-freed slot
+            # before the client's real reconnect arrived.
+            #
+            # Offloading to the default executor (a plain OS thread, not
+            # this loop) fixes that: the loop is never blocked, so Ping/
+            # Pong keepalive and every other connection's handshake are
+            # always serviced promptly, and -- since _active_connection/
+            # _active_session are already released above, before this is
+            # scheduled -- a reconnect is free to succeed immediately.
+            # The background thread never touches _active_connection/
+            # _active_session/_active_lock; it owns nothing but this one
+            # RuntimeSession's own shutdown.
+            loop.run_in_executor(
+                None, self._finish_disconnect,
+                reader_thread, reader_stop, session, _trace_session_id,
+            )
+
+    def _finish_disconnect(
+        self,
+        reader_thread: Optional[threading.Thread],
+        reader_stop: threading.Event,
+        session: Any,
+        trace_session_id: str,
+    ) -> None:
+        """
+        Runs on the default executor -- a plain OS thread, never the
+        gateway's asyncio event loop -- for exactly one connection's
+        post-disconnect cleanup (see _handler's finally block, the only
+        caller). Touches only this one RuntimeSession and its own
+        reader_thread/reader_stop; TransportGateway's shared
+        _active_connection/_active_session/_active_lock state is never
+        read or written here (already fully released, on the loop
+        thread, before this was scheduled).
+
+        RuntimeSession.teardown() (runtime.cloud_run_shell) is itself
+        idempotent (lock + one-shot flag), so this is also safe to run
+        concurrently with a SIGTERM-driven shutdown teardown of the same
+        session -- exactly the pre-existing guarantee this function
+        preserves, just off the event loop thread now.
+
+        Never raises: this runs detached (loop.run_in_executor's returned
+        Future is intentionally not awaited/stored by the caller), so an
+        uncaught exception here would only surface as an "exception was
+        never retrieved" warning instead of anywhere actionable. Every
+        step is therefore its own best-effort try/except, logged and
+        swallowed, the same fail-open shape the rest of this file already
+        uses for pipe-reader/relay errors.
+        """
+        try:
+            if reader_thread is not None:
+                reader_stop.set()
+                reader_thread.join(timeout=2.0)
+        except Exception as exc:
+            _log(f"reader thread join raised (session_id={trace_session_id}): {exc}")
+
+        if runtime_trace.enabled():
+            try:
+                runtime_trace.emit(
+                    "Session TEARDOWN START", session_id=trace_session_id,
+                    event_id="teardown-start",
+                    lifecycle_state=_SESSION_STATE_TEARDOWN,
+                )
+            except Exception:
+                pass
+
+        try:
+            self._session_teardown(session)
+        except Exception as exc:
+            _log(f"session teardown raised (session_id={trace_session_id}): {exc}")
+
+        if runtime_trace.enabled():
+            try:
+                runtime_trace.emit(
+                    "Session TEARDOWN END", session_id=trace_session_id,
+                    event_id="teardown-end",
+                    lifecycle_state=_SESSION_STATE_CLOSED,
+                )
+            except Exception:
+                pass
 
     # ── Event pipe → WS relay (outbound events, one per session) ────────────
 

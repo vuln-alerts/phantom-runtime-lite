@@ -19,10 +19,13 @@ EXPORTED API:
 """
 
 import asyncio
+import time
 from typing import Callable
 
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed, InvalidStatus
+
+import runtime_trace
 
 
 def _log(message: str) -> None:
@@ -50,6 +53,19 @@ class RuntimeWebSocketClient:
         self._url = url
         self._max_reconnect_attempts = max_reconnect_attempts
         self._backoff_base_seconds = backoff_base_seconds
+        # Debug-only state for the Runtime Pipeline stall investigation
+        # (see runtime_trace.py). Read via get_state(); never branched on.
+        self._state = {
+            "connected": False,
+            "reconnect_count": 0,
+            "last_send_ts": None,
+            "last_recv_ts": None,
+            "close_reason": None,
+            "last_exception": None,
+        }
+
+    def get_state(self) -> dict:
+        return dict(self._state)
 
     async def run(
         self,
@@ -63,30 +79,50 @@ class RuntimeWebSocketClient:
             try:
                 async with connect(self._url) as websocket:
                     _log(f"connected: {self._url}")
+                    self._state["connected"] = True
                     attempt = 0  # a successful handshake resets the backoff counter
                     await self._pump(websocket, audio_queue, control_queue, stop_event, on_event)
+                self._state["connected"] = False
                 if stop_event.is_set():
                     return
+                self._state["close_reason"] = "disconnected_by_server"
                 _log("disconnected by server; reconnecting")
             except InvalidStatus as exc:
+                self._state["connected"] = False
+                self._state["last_exception"] = str(exc)
                 status = getattr(exc, "response", None)
                 code = getattr(status, "status_code", None)
                 if code in (400, 404, 409):
+                    self._state["close_reason"] = f"handshake_rejected_{code}"
                     _log(f"fatal: handshake rejected ({code}); not retrying")
                     return
+                self._state["close_reason"] = f"handshake_failed_{code}"
                 _log(f"handshake failed ({code}); will retry")
             except ConnectionClosed as exc:
+                self._state["connected"] = False
+                self._state["last_exception"] = str(exc)
                 close_code = exc.rcvd.code if exc.rcvd is not None else None
                 if close_code in self._FATAL_CLOSE_CODES:
+                    self._state["close_reason"] = f"fatal_close_{close_code}"
                     _log(f"fatal: server closed with code {close_code}; not retrying")
                     return
+                self._state["close_reason"] = f"connection_closed_{close_code}"
                 _log(f"connection closed ({exc}); reconnecting")
             except OSError as exc:
+                self._state["connected"] = False
+                self._state["last_exception"] = str(exc)
+                self._state["close_reason"] = "os_error"
                 _log(f"connection error ({exc}); reconnecting")
 
             if stop_event.is_set():
                 return
             attempt += 1
+            self._state["reconnect_count"] += 1
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "WebSocket RECONNECT", event_id=f"reconnect-{attempt}",
+                    ws_state=self.get_state(),
+                )
             if attempt > self._max_reconnect_attempts:
                 _log(f"giving up after {self._max_reconnect_attempts} reconnect attempts")
                 return
@@ -129,6 +165,12 @@ class RuntimeWebSocketClient:
         while True:
             block = await audio_queue.get()
             await websocket.send(block)  # bytes -> binary frame (audio-in contract)
+            self._state["last_send_ts"] = time.time()
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "WebSocket SEND", event_id=runtime_trace.next_event_id("ws-send"),
+                    nbytes=len(block),
+                )
 
     async def _send_control(self, websocket, control_queue: "asyncio.Queue[str]") -> None:
         while True:
@@ -139,4 +181,10 @@ class RuntimeWebSocketClient:
         async for message in websocket:
             if isinstance(message, (bytes, bytearray)):
                 continue  # events are text-only per contract; ignore stray binary
+            self._state["last_recv_ts"] = time.time()
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "WebSocket RECEIVE", event_id=runtime_trace.next_event_id("ws-recv-evt"),
+                    nbytes=len(message),
+                )
             on_event(message)

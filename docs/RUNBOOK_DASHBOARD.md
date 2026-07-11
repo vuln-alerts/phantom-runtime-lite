@@ -1,9 +1,9 @@
 # Runbook — Dashboard閲覧機能 (RuntimePipelineOrchestrator / DashboardService / GET /dashboard / GET /)
 
-**Version:** 1.0
+**Version:** 1.1
 **Target Feature:** Hackathon提出物 — Runtime Pipeline Orchestrator (`src/runtime/pipeline_orchestrator.py`), DashboardService (`src/api/dashboard_service.py`), Dashboard View (`src/api/dashboard_view.py`, `src/api/templates/`), FastAPI拡張 (`GET /dashboard`, `GET /`)
-**Related:** `docs/RUNBOOK_RUNTIME_VERIFICATION.md`（Verification/Trust/Dashboard Runtime・FastAPI起動手順の詳細）, `docs/H4_RUNTIME_EVENT_CONTRACT.md`（Frozen）
-**Last Updated:** 2026-07-11
+**Related:** `docs/RUNBOOK_RUNTIME_VERIFICATION.md`（Verification/Trust/Dashboard Runtime・FastAPI起動手順の詳細）, `docs/H4_RUNTIME_EVENT_CONTRACT.md`（Frozen）, `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §11（TransportGateway Session Lifecycle Verification — WebSocket層の`1011`/`409`切り分け）
+**Last Updated:** 2026-07-12
 
 ---
 
@@ -203,6 +203,12 @@ python scripts/post_dashboard_event.py \
 
 想定内の制約。DashboardServiceは永続化しないインメモリ単一スロット。
 
+## 7.4 WebSocketが `1011`/`409` で切断・再接続を繰り返している間、Dashboardの内容が更新されない
+
+Dashboard（本Runbookの対象、`api.dashboard_service` / `api.dashboard_view`）と TransportGateway（`runtime.transport_gateway`、Cloud Run Compatibility ShellのWebSocket層）は独立したサブシステムであり、`POST /aggregate` を介した手動投入以外の自動連携は無い（§2.3参照）。したがって WebSocket側で `1011`/`409` が発生しても、Dashboard自体のコード（本Runbookが対象とするコンポーネント）には影響しない — 直近に投入された `DashboardResult` を保持し続ける。
+
+WebSocket接続そのものの `1011`/`409` の原因調査・切り分けは `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §11（TransportGateway Session Lifecycle Verification）を参照。Operator E2E実施時は、WebSocket側でreconnectが発生した前後でもDashboardの表示内容（Trust Score等）が意図せず消失・巻き戻っていないことを確認する（同Runbook §11.7のチェック項目）。
+
 ---
 
 # 8. Acceptance Criteria
@@ -295,3 +301,4 @@ Conversation Traceabilityの情報は、Runtime Eventの `metadata`（`docs/H4_R
 - [ ] Step2-3の手順で `POST /aggregate` を実行
 - [ ] `GET /dashboard` → 200 + 内容確認
 - [ ] `GET /` をブラウザで開いて表示確認
+- [ ] （Operator E2E実施時）WebSocket側でreconnectが発生しても、直近のDashboard内容が意図せず消失・巻き戻らないことを確認（§7.4、`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §11.7）

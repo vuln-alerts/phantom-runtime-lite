@@ -9,6 +9,7 @@ EXPORTED API:
 
 import queue
 import threading
+import time
 from typing import Callable
 
 import numpy as np
@@ -42,6 +43,18 @@ class VADOrchestrator:
         self._audio_queue      = audio_queue
         self._on_segment_ready = on_segment_ready
 
+        # Client Speech Gate (runtime_client/audio_bridge.py) never forwards
+        # a block during silence, so this Server VAD never sees the silent
+        # frames process_frame's frame-count-based silence_streak depends
+        # on -- see VADBuffer.check_idle_timeout's docstring. silence_blocks
+        # is reused here (not a new config knob) to derive the equivalent
+        # wall-clock idle threshold: block_size/sample_rate is the duration
+        # one block represents, same unit silence_blocks was already counted
+        # in, so the two stay in lockstep with whatever --silence-sec/
+        # RuntimeConfig.silence_sec derived them from.
+        self._silence_timeout_sec = silence_blocks * block_size / sample_rate
+        self._last_block_ts       = time.monotonic()
+
         self._vad_buf = VADBuffer(
             sample_rate           = sample_rate,
             pre_buffer_blocks     = pre_buffer_blocks,
@@ -67,7 +80,16 @@ class VADOrchestrator:
             try:
                 block = self._audio_queue.get(timeout=0.5)
             except queue.Empty:
+                # No block has arrived -- either true silence (Client Speech
+                # Gate is withholding audio) or the stream is idle. Either
+                # way, check whether an in-progress segment has gone quiet
+                # long enough to finalize as reason=silence.
+                idle_sec = time.monotonic() - self._last_block_ts
+                audio = self._vad_buf.check_idle_timeout(idle_sec, self._silence_timeout_sec)
+                if audio is not None:
+                    self._on_segment_ready(audio)
                 continue
+            self._last_block_ts = time.monotonic()
             flat   = block.flatten()
             silent = self._is_silent(flat)
             audio  = self._vad_buf.process_frame(flat, silent)

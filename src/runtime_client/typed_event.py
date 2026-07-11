@@ -63,6 +63,7 @@ from collections import deque
 from typing import NamedTuple, Optional
 
 from runtime_client.tts import NullTTSProvider, TTSProvider
+import runtime_trace
 
 _TTS_SPEAK_DEADLINE_SECONDS = 10.0
 _TTS_POLL_INTERVAL_SECONDS = 0.05
@@ -317,6 +318,13 @@ class TypedEventStore:
         speaker = str(payload.get("speaker", "unknown"))
         with self.log_lock:
             self.transcript_log.append(LogEntry(text=text, lang=lang, ts=ts, speaker=speaker))
+            line_no = len(self.transcript_log)
+        if runtime_trace.enabled():
+            runtime_trace.emit(
+                "Conversation APPEND (client)",
+                event_id=runtime_trace.next_event_id("conv-client"),
+                line_no=line_no, ts=ts, speaker=speaker, text_preview=text[:60],
+            )
         show_transcript(text, lang, ts)
 
     def _handle_reply(self, payload: dict) -> None:
