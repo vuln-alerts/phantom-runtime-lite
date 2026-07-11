@@ -37,6 +37,9 @@ def _dashboard_result(**overrides):
         human_review_required=True,
         review_reason="low trust score",
         contributing_factors=["f1"],
+        conversation_line=31,
+        speaker="YOU",
+        transcript="現在、利用人数はどのくらいを想定されていますか？",
     )
     fields.update(overrides)
     return DashboardResult(**fields)
@@ -69,6 +72,28 @@ class RenderDashboardHtmlTests(unittest.TestCase):
         html = render_dashboard_html(_dashboard_result(review_reason="<script>alert(1)</script>"))
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertIn("&lt;script&gt;", html)
+
+    def test_renders_conversation_traceability_alongside_event_and_session_id(self):
+        # Conversation Traceability additions must not remove Event ID /
+        # Session ID (docs/H4_RUNTIME_EVENT_CONTRACT.md, "Runtime Event
+        # Metadata").
+        html = render_dashboard_html(_dashboard_result())
+        self.assertIn("Conversation", html)
+        self.assertIn("#31", html)            # conversation_line
+        self.assertIn("Speaker", html)
+        self.assertIn("YOU", html)
+        self.assertIn("Transcript", html)
+        self.assertIn("現在、利用人数はどのくらいを想定されていますか？", html)
+        self.assertIn("Event ID", html)
+        self.assertIn("evt-1", html)
+        self.assertIn("Session ID", html)
+        self.assertIn("sess-1", html)
+
+    def test_missing_conversation_fields_render_as_placeholder(self):
+        html = render_dashboard_html(
+            _dashboard_result(conversation_line=None, speaker=None, transcript=None)
+        )
+        self.assertIn("—", html)
 
 
 if __name__ == "__main__":

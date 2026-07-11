@@ -35,7 +35,10 @@ from api import api_server
 from api.api_server import app
 
 
-def _event_aggregate(trust_score=0.87, trust_level="TRUSTED", source_event_id="evt-1"):
+def _event_aggregate(
+    trust_score=0.87, trust_level="TRUSTED", source_event_id="evt-1",
+    conversation_line=None, speaker=None, transcript=None,
+):
     vr = VerificationResult(
         schema_version="1.0", source_event_id=source_event_id, session_id="sess-1",
         timestamp=datetime.datetime.now(datetime.timezone.utc),
@@ -55,6 +58,7 @@ def _event_aggregate(trust_score=0.87, trust_level="TRUSTED", source_event_id="e
         reliability_score=1.0, reliable=True, warnings=[],
         trust_score=trust_score, trust_level=trust_level,
         human_review_required=False, review_reason=None, contributing_factors=[],
+        conversation_line=conversation_line, speaker=speaker, transcript=transcript,
     )
     return EventAggregator().aggregate(vr, tr, dr)
 
@@ -112,6 +116,35 @@ class DashboardRoutesTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("0.730", response.text)
+
+    def test_get_dashboard_json_includes_conversation_traceability_fields(self):
+        # Conversation Traceability (docs/H4_RUNTIME_EVENT_CONTRACT.md,
+        # "Runtime Event Metadata") must be available via GET /dashboard's
+        # JSON, not only via the HTML view (GET /).
+        ea = _event_aggregate(
+            source_event_id="evt-conv",
+            conversation_line=31,
+            speaker="YOU",
+            transcript="現在、利用人数はどのくらいを想定されていますか？",
+        )
+        self.client.post("/aggregate", json=_payload(ea))
+
+        response = self.client.get("/dashboard")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["conversation_line"], 31)
+        self.assertEqual(body["speaker"], "YOU")
+        self.assertEqual(body["transcript"], "現在、利用人数はどのくらいを想定されていますか？")
+
+    def test_get_dashboard_json_conversation_fields_are_null_when_absent(self):
+        ea = _event_aggregate(source_event_id="evt-no-conv")
+        self.client.post("/aggregate", json=_payload(ea))
+
+        response = self.client.get("/dashboard")
+        body = response.json()
+        self.assertIsNone(body["conversation_line"])
+        self.assertIsNone(body["speaker"])
+        self.assertIsNone(body["transcript"])
 
     def test_aggregate_response_shape_is_unaffected_by_dashboard_support(self):
         ea = _event_aggregate()

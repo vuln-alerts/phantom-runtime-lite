@@ -9,6 +9,10 @@ assembles HTML tags itself. Every substituted value is html.escape()'d
 before insertion, since DashboardResult fields (e.g. review_reason,
 warnings) may contain arbitrary text.
 
+Includes Conversation Traceability fields (conversation_line, speaker,
+transcript) alongside the existing Verification/Trust display fields --
+see docs/H4_RUNTIME_EVENT_CONTRACT.md, "Runtime Event Metadata".
+
 EXPORTED API:
   render_dashboard_html(dashboard_result: Optional[DashboardResult]) -> str
 """
@@ -38,7 +42,21 @@ def render_dashboard_html(dashboard_result: Optional[DashboardResult]) -> str:
 
     warnings_text = "; ".join(dashboard_result.warnings) if dashboard_result.warnings else "(none)"
 
+    conversation_line_text = (
+        f"#{dashboard_result.conversation_line}"
+        if dashboard_result.conversation_line is not None
+        else "—"
+    )
+
     fields = {
+        # -- Conversation Traceability (docs/H4_RUNTIME_EVENT_CONTRACT.md,
+        # "Runtime Event Metadata") -- read verbatim off DashboardResult,
+        # no Dashboard logic involved.
+        "conversation_line":     conversation_line_text,
+        "speaker":               dashboard_result.speaker or "—",
+        "transcript":            dashboard_result.transcript or "—",
+        "session_id":            dashboard_result.session_id or "—",
+        "event_id":              dashboard_result.source_event_id or "—",
         "trust_score":           f"{dashboard_result.trust_score:.3f}",
         "trust_level":           dashboard_result.trust_level,
         "reliability_score":     f"{dashboard_result.reliability_score:.3f}",
@@ -47,8 +65,6 @@ def render_dashboard_html(dashboard_result: Optional[DashboardResult]) -> str:
         "human_review_required": _yes_no(dashboard_result.human_review_required),
         "review_reason":         dashboard_result.review_reason or "—",
         "warnings":              warnings_text,
-        "session_id":            dashboard_result.session_id or "—",
-        "event_id":              dashboard_result.source_event_id or "—",
         "timestamp":             dashboard_result.timestamp.isoformat(),
     }
     escaped_fields = {key: html.escape(str(value)) for key, value in fields.items()}

@@ -143,6 +143,73 @@ class SessionStateIsReusedAcrossCallsTests(unittest.TestCase):
         self.assertTrue(outcome_2.verification_result.gap_detected)
 
 
+def _raw_event_with_metadata(event_type, payload, metadata, timestamp=_TS):
+    """Same envelope shape as _raw_event(), plus the optional Runtime Event
+    "metadata" field (docs/H4_RUNTIME_EVENT_CONTRACT.md, "Runtime Event
+    Metadata")."""
+    return {
+        "version": 1, "type": event_type, "timestamp": timestamp,
+        "payload": payload, "metadata": metadata,
+    }
+
+
+class ConversationTraceabilityTests(unittest.TestCase):
+    def test_metadata_conversation_fields_propagate_to_dashboard_result(self):
+        raw_event = _raw_event_with_metadata(
+            "transcript",
+            {"text": "hello there", "lang": "en", "ts": 1720000000.0, "speaker": "user"},
+            {"conversation_line": 31, "speaker": "YOU", "transcript": "現在、利用人数はどのくらいを想定されていますか？"},
+        )
+        outcome = RuntimePipelineOrchestrator().run(raw_event)
+        self.assertEqual(outcome.dashboard_result.conversation_line, 31)
+        self.assertEqual(outcome.dashboard_result.speaker, "YOU")
+        self.assertEqual(
+            outcome.dashboard_result.transcript,
+            "現在、利用人数はどのくらいを想定されていますか？",
+        )
+
+    def test_missing_metadata_key_yields_none_conversation_fields(self):
+        outcome = RuntimePipelineOrchestrator().run(RAW_FIXTURES["transcript"])
+        self.assertIsNone(outcome.dashboard_result.conversation_line)
+        self.assertIsNone(outcome.dashboard_result.speaker)
+        self.assertIsNone(outcome.dashboard_result.transcript)
+
+    def test_empty_metadata_dict_yields_none_conversation_fields(self):
+        raw_event = _raw_event_with_metadata(
+            "transcript",
+            {"text": "hello there", "lang": "en", "ts": 1720000000.0, "speaker": "user"},
+            {},
+        )
+        outcome = RuntimePipelineOrchestrator().run(raw_event)
+        self.assertIsNone(outcome.dashboard_result.conversation_line)
+        self.assertIsNone(outcome.dashboard_result.speaker)
+        self.assertIsNone(outcome.dashboard_result.transcript)
+
+    def test_metadata_never_affects_verification_or_trust_results(self):
+        # VerificationRuntime/TrustRuntime logic must be unaffected by the
+        # presence of Conversation Traceability metadata.
+        without_metadata = RuntimePipelineOrchestrator().run(RAW_FIXTURES["transcript"])
+        with_metadata = RuntimePipelineOrchestrator().run(
+            _raw_event_with_metadata(
+                "transcript",
+                RAW_FIXTURES["transcript"]["payload"],
+                {"conversation_line": 1, "speaker": "YOU", "transcript": "x"},
+            )
+        )
+        self.assertEqual(
+            without_metadata.verification_result.gap_detected,
+            with_metadata.verification_result.gap_detected,
+        )
+        self.assertEqual(
+            without_metadata.verification_result.reliability_score,
+            with_metadata.verification_result.reliability_score,
+        )
+        self.assertEqual(
+            without_metadata.trust_result.trust_score,
+            with_metadata.trust_result.trust_score,
+        )
+
+
 class MatchesReferencePipelineTests(unittest.TestCase):
     # source_event_id/session_id/timestamp are excluded: both _run_pipeline()
     # and RuntimePipelineOrchestrator().run() build their own fresh

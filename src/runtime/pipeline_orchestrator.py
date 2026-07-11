@@ -19,6 +19,13 @@ state (sequence/timestamp bookkeeping used for Gap Detection); reusing one
 instance across multiple run() calls is required for that state to have any
 effect across a session's events.
 
+Conversation Traceability: run() also reads conversation_line/speaker/
+transcript from raw_event["metadata"] (docs/H4_RUNTIME_EVENT_CONTRACT.md,
+"Runtime Event Metadata") and passes them straight through to
+DashboardRuntime.render(). This adds no new business logic -- it is a
+verbatim read-and-forward, same as everything else in this module -- and
+raw_event's metadata is never guessed when absent.
+
 EXPORTED API:
   PipelineOutcome            -- the five artifacts one run() call produces
   RuntimePipelineOrchestrator(adapter=None, verification_runtime=None)
@@ -65,7 +72,23 @@ class RuntimePipelineOrchestrator:
         event = self._adapter.translate(raw_event)
         verification_result = self._verification_runtime.handle(event)
         trust_result = TrustRuntime().handle(verification_result)
-        dashboard_result = DashboardRuntime().render(verification_result, trust_result)
+
+        # Conversation Traceability (docs/H4_RUNTIME_EVENT_CONTRACT.md,
+        # "Runtime Event Metadata"): read verbatim from raw_event["metadata"]
+        # and passed straight through to Dashboard -- never inferred, and
+        # absent when raw_event carries no metadata.
+        metadata = raw_event.get("metadata") or {}
+        conversation_line = metadata.get("conversation_line")
+        speaker = metadata.get("speaker")
+        transcript = metadata.get("transcript")
+
+        dashboard_result = DashboardRuntime().render(
+            verification_result,
+            trust_result,
+            conversation_line=conversation_line,
+            speaker=speaker,
+            transcript=transcript,
+        )
         event_aggregate = EventAggregator().aggregate(
             verification_result, trust_result, dashboard_result
         )

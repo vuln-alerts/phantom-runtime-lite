@@ -221,6 +221,72 @@ python scripts/post_dashboard_event.py \
 
 ---
 
+# 8A. Conversation Traceability
+
+## 8A.1 目的
+
+Dashboardの Trust Score / Gap Detected / Session ID / Event ID だけでは、「どのRuntime Conversationのどの発話に対する評価なのか」が分からない。この節は、Runtime ConversationからDashboardまでのConversation Traceabilityの追跡経路を記述する。
+
+## 8A.2 アーキテクチャ
+
+```
+Runtime Conversation
+        │
+        ▼
+Runtime Event
+        │
+        ▼
+Verification Runtime
+        │
+        ▼
+Trust Runtime
+        │
+        ▼
+Dashboard Runtime
+```
+
+## 8A.3 Runtime Eventの責務
+
+Conversation Traceabilityの情報は、Runtime Eventの `metadata`（`docs/H4_RUNTIME_EVENT_CONTRACT.md` の「Runtime Event Metadata」節で正式に定義）が保持する責務を持つ。`payload` の意味・内容は変更しない。
+
+```json
+{
+  "version": 1,
+  "type": "transcript",
+  "timestamp": "...",
+  "payload": { "...": "..." },
+  "metadata": {
+    "conversation_line": 31,
+    "speaker": "YOU",
+    "transcript": "現在、利用人数はどのくらいを想定されていますか？"
+  }
+}
+```
+
+保持する項目:
+
+| Field | Type | Description |
+|---|---|---|
+| `conversation_line` | int? | Runtime Conversation の発話番号 |
+| `speaker` | string? | `YOU` / `AGT` |
+| `transcript` | string? | Runtime Conversation の発話内容 |
+
+`metadata` が無い、または上記キーが無い場合は、値を推測せず `None`（JSON上は `null`）とする。
+
+## 8A.4 伝搬経路
+
+- `RuntimePipelineOrchestrator.run()` は `raw_event["metadata"]` を読み取り、`conversation_line` / `speaker` / `transcript` を変換・推測・検証せず、そのまま `DashboardRuntime.render()` へ渡す（Read Only / Pass Through / No Business Logic）。
+- `DashboardRuntime` はロジックを持たず、受け取った3項目をそのまま `DashboardResult` にコピーする。
+- `EventAggregator`/`EventAggregate` は変更しない。`EventAggregate.dashboard_result` が `DashboardResult` を参照として保持しているため、追加の契約変更なしに `POST /aggregate` レスポンス・`GET /dashboard` の両方に3項目が含まれる。
+- `VerificationRuntime`/`TrustRuntime` は一切変更しない。両者はConversation情報を読み書きしない。
+
+## 8A.5 Dashboardでの確認方法
+
+- `GET /`（HTML）: `Conversation` / `Speaker` / `Transcript` の行が、既存の `Event ID` / `Session ID` / `Trust Score` 等とともに表示される。
+- `GET /dashboard`（JSON）: レスポンスボディに `conversation_line` / `speaker` / `transcript` が含まれる（Conversation情報未投入時は `null`）。
+
+---
+
 # 9. Operational Checklist
 
 - [ ] `pip install uvicorn`

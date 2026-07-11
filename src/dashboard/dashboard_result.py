@@ -42,3 +42,11 @@ class DashboardResult:
     human_review_required:    bool
     review_reason:            Optional[str]
     contributing_factors:     List[str]
+
+    # -- Conversation Traceability fields --
+    # Sourced from Runtime Event metadata (docs/H4_RUNTIME_EVENT_CONTRACT.md,
+    # "Runtime Event Metadata"), not computed by Dashboard. None when the
+    # source Runtime Event carried no metadata.
+    conversation_line:        Optional[int] = None
+    speaker:                  Optional[str] = None
+    transcript:                Optional[str] = None

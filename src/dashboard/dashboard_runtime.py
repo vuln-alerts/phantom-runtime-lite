@@ -20,7 +20,9 @@ its two arguments. No instance state, session memory, caches, or globals
 are used.
 
 EXPORTED API:
-  DashboardRuntime — render(verification_result, trust_result) -> DashboardResult
+  DashboardRuntime — render(verification_result, trust_result,
+                             conversation_line=None, speaker=None, transcript=None)
+                     -> DashboardResult
 """
 
 from datetime import datetime, timezone
@@ -43,6 +45,9 @@ class DashboardRuntime:
         self,
         verification_result: VerificationResult,
         trust_result: TrustResult,
+        conversation_line=None,
+        speaker=None,
+        transcript=None,
     ) -> DashboardResult:
         """Render one (VerificationResult, TrustResult) pair into a new
         DashboardResult.
@@ -51,6 +56,12 @@ class DashboardRuntime:
         either is written back. Identity (source_event_id, session_id) is
         propagated from `verification_result`, which is the earlier link
         in the Verification -> Trust -> Dashboard chain.
+
+        conversation_line/speaker/transcript are Conversation Traceability
+        metadata (docs/H4_RUNTIME_EVENT_CONTRACT.md, "Runtime Event
+        Metadata") read off the source Runtime Event by the caller. They
+        are copied verbatim onto DashboardResult -- Dashboard computes,
+        infers, or validates nothing about them.
         """
         return DashboardResult(
             schema_version=_SCHEMA_VERSION,
@@ -68,4 +79,7 @@ class DashboardRuntime:
             human_review_required=trust_result.human_review_required,
             review_reason=trust_result.review_reason,
             contributing_factors=list(trust_result.contributing_factors),
+            conversation_line=conversation_line,
+            speaker=speaker,
+            transcript=transcript,
         )

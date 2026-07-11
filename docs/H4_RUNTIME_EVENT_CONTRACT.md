@@ -159,7 +159,71 @@ sequence: int
 type: EventType
 
 payload: EventPayload
+
+metadata: EventMetadata (optional)
 ```
+
+---
+
+# Runtime Event Metadata
+
+metadata is a reserved area for Runtime Event supplementary information.
+
+metadata is independent of payload. The meaning of payload is not changed by metadata.
+
+metadata is optional. Its absence never raises and downstream Runtimes treat it as empty.
+
+## Purpose
+
+metadata formally defines the Conversation Traceability responsibility of the Runtime Event: which Runtime Conversation line, spoken by which speaker, produced this event.
+
+metadata is also the common extension point for future Runtime Event supplementary fields, so that future additions do not require new top-level envelope fields.
+
+## Fields currently in use
+
+| Field | Type | Description |
+|--------|------|-------------|
+| conversation_line | int? | Runtime Conversation の発話番号 |
+| speaker | string? | YOU / AGT |
+| transcript | string? | Runtime Conversation の発話内容 |
+
+## Reserved fields (not yet in use)
+
+The following fields are reserved for future use. This contract revision does not read, write, or generate any of them:
+
+* trace_id
+* runtime_version
+* websocket_id
+* provider
+* provider_model
+* latency
+* device
+* microphone
+* observation_id
+
+## Example
+
+```json
+{
+  "version": 1,
+  "type": "transcript",
+  "timestamp": "...",
+
+  "payload": {
+      ...
+  },
+
+  "metadata": {
+      "conversation_line": 31,
+      "speaker": "YOU",
+      "transcript": "現在、利用人数はどのくらいを想定されていますか？"
+  }
+}
+```
+
+## Compatibility
+
+metadata follows the same Backward Compatibility rules as payload (see "Backward Compatibility" below): it is an optional addition within schema_version 1.0 and does not require a new major schema version.
 
 ---
 
