@@ -65,14 +65,17 @@ EXPORTED API:
 """
 
 import asyncio
+import os
 import queue
 import threading
+import time
 from typing import TYPE_CHECKING, Callable, Optional
 
 import numpy as np
 
 from audio.capture import AudioCapture
 from audio.devices import resolve_device_id
+from runtime_client import debug_sink
 
 if TYPE_CHECKING:
     # Type-checking only -- see module docstring's "Adaptive Speech Gate"
@@ -90,6 +93,47 @@ def block_rms(block: np.ndarray) -> float:
     if block.size == 0:
         return 0.0
     return float(np.sqrt(np.mean(block.astype(np.float32) ** 2)))
+
+
+# ---------------------------------------------------------------------------
+# Production Verification investigation instrumentation (TEMPORARY).
+#
+# Added to make it observable, during Production Verification, whether a
+# "no Transcript" symptom is caused by captured audio never clearing the
+# Speech Gate in _run_pump below. Diagnostic only: it reads the same rms/
+# gate values _run_pump already computed for its (unmodified) gating
+# decision and only ever prints/tees them -- it does not influence which
+# blocks get forwarded. Inert unless PHANTOM_CALIBRATION_DEBUG=1 (the same
+# flag --production-verification already turns on, see main.py), so
+# default behavior is unchanged. Mirrors calibration.py's _debug_log /
+# debug_sink.py convention so every line is grep-able via `[audio-debug]`
+# and tees to the same Production Verification session log file when one
+# is open.
+# ---------------------------------------------------------------------------
+_AUDIO_DEBUG_HEARTBEAT_SEC = 1.0
+
+
+def _audio_debug_print(text: str) -> None:
+    print(text, flush=True)
+    debug_sink.write(text)
+
+
+# ---------------------------------------------------------------------------
+# Production Verification investigation instrumentation (TEMPORARY).
+#
+# PHANTOM_DISABLE_SPEECH_GATE=1 bypasses the `if rms < gate: continue` check
+# in _run_pump below entirely, forwarding every block that already cleared
+# the Recording Gate. Purpose: isolate where the Mic -> Calibration ->
+# Speech Gate -> AudioBridge -> WebSocket -> Cloud Run -> VAD -> Whisper ->
+# Transcript pipeline is failing during Production Verification. If
+# Transcript still doesn't appear with the gate disabled, the Speech Gate
+# was not the cause -- look downstream of AudioBridge instead. Diagnostic
+# only: does not touch Calibration, does not change how the Speech Gate
+# itself is derived, and does not change AudioBridge's public API. Default
+# (unset) preserves _run_pump()'s exact pre-existing behavior byte-for-byte.
+# ---------------------------------------------------------------------------
+def _speech_gate_disabled() -> bool:
+    return os.getenv("PHANTOM_DISABLE_SPEECH_GATE") == "1"
 
 
 class AudioBridge:
@@ -140,6 +184,9 @@ class AudioBridge:
         self._shutdown = threading.Event()
         self._capture_thread: Optional[threading.Thread] = None
         self._pump_thread: Optional[threading.Thread] = None
+        self._debug_is_speech: Optional[bool] = None
+        self._debug_last_heartbeat: float = 0.0
+        self._debug_gate_disabled_announced: bool = False
 
     def start(self) -> None:
         self._capture_thread = threading.Thread(
@@ -189,11 +236,63 @@ class AudioBridge:
             if not self._recording_active.is_set():
                 continue  # RECORDING OFF -- never forwarded, so the Server
                           # never sees, transcribes, or replies to it
-            if block_rms(block) < self._current_speech_gate():
-                continue  # silence -- never forwarded, so the Server's
-                          # VAD/Whisper can't repeatedly hallucinate on it
+            rms = block_rms(block)
+            if _speech_gate_disabled():
+                # Production Verification investigation instrumentation
+                # (TEMPORARY) -- see _speech_gate_disabled()'s module-level
+                # note. Every block that reaches this branch is forwarded
+                # unconditionally; the Speech Gate is not consulted at all.
+                if debug_sink.is_enabled():
+                    self._log_speech_gate_disabled_debug(rms)
+            else:
+                gate = self._current_speech_gate()
+                if debug_sink.is_enabled():
+                    self._log_speech_gate_debug(rms, gate)
+                if rms < gate:
+                    continue  # silence -- never forwarded, so the Server's
+                              # VAD/Whisper can't repeatedly hallucinate on it
             data = block.tobytes()
             self._loop.call_soon_threadsafe(self._enqueue, data)
+
+    def _log_speech_gate_debug(self, rms: float, gate: float) -> None:
+        """Production Verification instrumentation (TEMPORARY) -- see the
+        module-level comment above _audio_debug_print(). Diagnostic only:
+        prints/tees the rms/gate values _run_pump already computed: an
+        edge-triggered Speech START/END line on state change, plus a
+        throttled (~1/sec) state heartbeat. Does not affect gating."""
+        is_speech = rms >= gate
+        if self._debug_is_speech is None:
+            self._debug_is_speech = is_speech  # establish baseline, no transition log
+        elif is_speech != self._debug_is_speech:
+            state = "START" if is_speech else "END"
+            _audio_debug_print(f"[audio-debug] Speech {state} (RMS={rms:.0f} Gate={gate:.0f})")
+            self._debug_is_speech = is_speech
+
+        now = time.monotonic()
+        if now - self._debug_last_heartbeat >= _AUDIO_DEBUG_HEARTBEAT_SEC:
+            self._debug_last_heartbeat = now
+            _audio_debug_print(
+                f"[audio-debug]\nRMS={rms:.0f}\nGate={gate:.0f}\n"
+                f"Speech={'YES' if is_speech else 'NO'}"
+            )
+
+    def _log_speech_gate_disabled_debug(self, rms: float) -> None:
+        """Production Verification instrumentation (TEMPORARY) -- see
+        _speech_gate_disabled()'s module-level comment. Diagnostic only:
+        announces the bypass once, then prints a throttled (~1/sec)
+        heartbeat confirming every block is being forwarded. Does not
+        affect gating -- the caller has already skipped it; this only
+        reports that fact."""
+        if not self._debug_gate_disabled_announced:
+            _audio_debug_print("[audio-debug] Speech Gate: DISABLED")
+            self._debug_gate_disabled_announced = True
+
+        now = time.monotonic()
+        if now - self._debug_last_heartbeat >= _AUDIO_DEBUG_HEARTBEAT_SEC:
+            self._debug_last_heartbeat = now
+            _audio_debug_print(
+                f"[audio-debug]\nRMS={rms:.0f}\nGate=DISABLED\nForward=YES"
+            )
 
     def _enqueue(self, data: bytes) -> None:
         try:

@@ -469,10 +469,11 @@ class TestAdaptiveSpeechGate(unittest.TestCase):
 
     def test_gate_updates_live_after_successful_recalibration(self):
         # contamination_threshold is raised for this controller so a
-        # 200-RMS "quiet" sample (still well under the 500-RMS probe
+        # 450-RMS "quiet" sample (still well under the 500-RMS probe
         # block below) doesn't itself count as contamination -- default
-        # CalibrationEngine multiplier/clamp (3.0, [150, 2500]) is used
-        # unmodified, so noise_floor=200 -> speech_gate=600.
+        # CalibrationEngine multiplier/clamp (1.2, [150, 2500]) -- see
+        # docs/designs/ADAPTIVE_CALIBRATION_DESIGN_REVIEW.md Option 1 --
+        # is used unmodified, so noise_floor=450 -> speech_gate=540.
         controller = RecalibrationController(
             CalibrationEngine(),
             _calibration_result(150.0),
@@ -492,8 +493,8 @@ class TestAdaptiveSpeechGate(unittest.TestCase):
 
             controller.begin_recalibration()
             for _ in range(2):
-                controller.add_block(np.full((1600, 1), 200, dtype=np.int16))
-            self.assertAlmostEqual(controller.active_result.speech_gate, 600.0, places=6)
+                controller.add_block(np.full((1600, 1), 450, dtype=np.int16))
+            self.assertAlmostEqual(controller.active_result.speech_gate, 540.0, places=6)
 
             # Same block is now below the new, higher live gate -> dropped.
             bridge._raw_queue.put(mid_block)

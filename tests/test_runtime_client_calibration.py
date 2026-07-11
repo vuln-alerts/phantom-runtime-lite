@@ -247,13 +247,16 @@ class TestEnvironmentObserverExhaustion(unittest.TestCase):
 
 
 class TestCalibrationEngineDerivation(unittest.TestCase):
-    def test_default_constants_match_design_doc_section_6_3(self):
-        self.assertEqual(DEFAULT_SPEECH_GATE_MULTIPLIER, 3.0)
+    def test_default_constants_reflect_design_review_recalibration(self):
+        # Recalibrated per docs/designs/ADAPTIVE_CALIBRATION_DESIGN_REVIEW.md
+        # (Option 1), superseding design doc section 6.3's original 3.0 --
+        # see DEFAULT_SPEECH_GATE_MULTIPLIER's docstring in calibration.py.
+        self.assertEqual(DEFAULT_SPEECH_GATE_MULTIPLIER, 1.2)
         self.assertEqual(DEFAULT_SPEECH_GATE_MIN, 150.0)
         self.assertEqual(DEFAULT_SPEECH_GATE_MAX, 2500.0)
 
     def test_noise_floor_below_min_clamps_speech_gate_to_150(self):
-        # 10 * 3.0 == 30, below the 150 floor.
+        # 10 * 1.2 == 12, below the 150 floor.
         engine = CalibrationEngine()
         observation = ObservationResult(
             success=True, noise_floor=10.0, sample_count=25, attempts=1
@@ -261,20 +264,22 @@ class TestCalibrationEngineDerivation(unittest.TestCase):
         result = engine.calibrate(observation)
         self.assertEqual(result.speech_gate, 150.0)
 
-    def test_normal_noise_floor_multiplies_by_3(self):
-        # design doc section 8.3 example: 182 RMS -> 546 RMS.
+    def test_normal_noise_floor_multiplies_by_default_multiplier(self):
+        # Design Review Option 1 recalibration: 182 RMS -> 218.4 RMS
+        # (182 * 1.2), superseding design doc section 8.3's 3.0x example
+        # (182 -> 546).
         engine = CalibrationEngine()
         observation = ObservationResult(
             success=True, noise_floor=182.0, sample_count=25, attempts=1
         )
         result = engine.calibrate(observation)
-        self.assertAlmostEqual(result.speech_gate, 546.0, places=6)
+        self.assertAlmostEqual(result.speech_gate, 218.4, places=6)
 
     def test_noise_floor_above_max_clamps_speech_gate_to_2500(self):
-        # 1000 * 3.0 == 3000, above the 2500 ceiling.
+        # 2200 * 1.2 == 2640, above the 2500 ceiling.
         engine = CalibrationEngine()
         observation = ObservationResult(
-            success=True, noise_floor=1000.0, sample_count=25, attempts=1
+            success=True, noise_floor=2200.0, sample_count=25, attempts=1
         )
         result = engine.calibrate(observation)
         self.assertEqual(result.speech_gate, 2500.0)
@@ -288,7 +293,7 @@ class TestCalibrationEngineDerivation(unittest.TestCase):
         self.assertIsInstance(result, CalibrationResult)
         self.assertTrue(result.success)
         self.assertEqual(result.noise_floor, 182.0)
-        self.assertAlmostEqual(result.speech_gate, 546.0, places=6)
+        self.assertAlmostEqual(result.speech_gate, 218.4, places=6)
         self.assertEqual(result.sample_count, 25)
         self.assertEqual(result.attempts, 2)
 

@@ -166,14 +166,27 @@ DEFAULT_NOISE_FLOOR_SAFETY_FLOOR = 150.0
 # 9.4's "2.5秒 x リトライ(最大3回) = 最大7.5秒" arithmetic
 DEFAULT_MAX_ATTEMPTS = 3
 
-# design doc section 6.3: "倍率 3.0 は「ノイズフロアの3倍以上の音圧を、
-# 発話の意思とみなす」という単一の相対ルール" -- the Speech Gate's relative
-# multiplier over the measured Noise Floor. A distinct constant from
-# Phase 1's DEFAULT_NOISE_FLOOR_SAFETY_FLOOR above even though it will
-# turn out to share the same numeric value as SPEECH_GATE_MIN below --
-# see that constant's docstring for why Phase 1 deliberately did not
-# reuse the Speech Gate formula itself.
-DEFAULT_SPEECH_GATE_MULTIPLIER = 3.0
+# Recalibrated per docs/designs/ADAPTIVE_CALIBRATION_DESIGN_REVIEW.md
+# (Option 1), superseding design doc section 6.3's original 3.0. Production
+# Verification measured actual conversational RMS against measured Noise
+# Floor on two real mics and found the ratio topped out at 1.7-1.8x
+# (MacBook Pro internal: 325/180 = 1.8x; USB external: 1700/985 = 1.73x)
+# -- never reaching 3x, so a 3.0 multiplier put the Speech Gate above any
+# normal conversational RMS the Runtime ever actually observed (internal
+# mic: Gate 540 vs. a 120-325 conversational range that never crosses it;
+# external mic: Gate clamped to the 2500 ceiling vs. a 400-1700 range that
+# cannot reach it), which is the root cause behind Production
+# Verification's "no Speech START" / "Speech START only momentary, no
+# Transcript" symptoms. Further recalibrated from an intermediate 1.5 to
+# 1.2 after continued Production Verification, while remaining a relative
+# multiplier over the measured Noise Floor (Runtime Philosophy: still
+# derived from Runtime Observation, not a fixed absolute RMS value) --
+# same formula shape as before, only the coefficient changed. A distinct
+# constant from Phase 1's DEFAULT_NOISE_FLOOR_SAFETY_FLOOR above; see
+# DEFAULT_CONTAMINATION_THRESHOLD_MULTIPLIER below for why Startup
+# Calibration's contamination detection is kept as a separate constant
+# from this one.
+DEFAULT_SPEECH_GATE_MULTIPLIER = 1.2
 
 # design doc section 6.3: "`min=150` は...Gate が過敏になりすぎて僅かな
 # 環境音にも反応することを防ぐ安全下限" -- the clamp's lower bound.
@@ -182,6 +195,20 @@ DEFAULT_SPEECH_GATE_MIN = 150.0
 # design doc section 6.3: "`max=2500` は...Gate が現実的に到達不能な値
 # まで跳ね上がることを防ぐ安全上限" -- the clamp's upper bound.
 DEFAULT_SPEECH_GATE_MAX = 2500.0
+
+# docs/designs/ADAPTIVE_CALIBRATION_DESIGN_REVIEW.md, Option 1: a separate
+# constant on purpose, independent of DEFAULT_SPEECH_GATE_MULTIPLIER above,
+# even though continued Production Verification has since brought both to
+# the same 1.2 value. main.py's Startup Calibration reuses CalibrationEngine's
+# own clamp(floor * multiplier, ...) formula to derive its dynamic
+# Contamination Threshold (see _derive_dynamic_contamination_threshold
+# there) -- a *different* concern from the Speech Gate above ("is this
+# block loud enough to be someone talking during what should be a silent
+# window?" vs. "is this block loud enough to be worth transcribing during
+# normal operation?"). Keeping this as its own constant means future
+# recalibration of either value does not silently change the other, even
+# when they happen to coincide numerically today.
+DEFAULT_CONTAMINATION_THRESHOLD_MULTIPLIER = 1.2
 
 # design doc section 6.4 / 5.2 sequence diagram: "1.5秒間 静寂区間を探索
 # しつつ再サンプリング" -- the re-calibration observation window is

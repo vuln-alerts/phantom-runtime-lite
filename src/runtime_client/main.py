@@ -74,6 +74,7 @@ from audio.capture import AudioCapture
 
 from runtime_client.audio_bridge import AudioBridge, block_rms, resolve_input_device
 from runtime_client.calibration import (
+    DEFAULT_CONTAMINATION_THRESHOLD_MULTIPLIER,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_NOISE_FLOOR_SAFETY_FLOOR,
     DEFAULT_PERCENTILE,
@@ -355,18 +356,31 @@ def _derive_dynamic_contamination_threshold(
     baseline: Optional[NoiseFloorSampler], engine: CalibrationEngine
 ) -> float:
     """
-    Temporary reuse of CalibrationEngine's Speech Gate derivation for
-    Startup Calibration only.
+    Reuse of CalibrationEngine's clamp(floor * multiplier, ...) derivation
+    shape for Startup Calibration's Contamination Threshold only.
 
     Startup Calibration needs an adaptive Contamination Threshold
     derived from the environment actually observed at this launch
     (Runtime Philosophy: observe the environment, then derive Runtime
     parameters from that observation -- not from a value fixed at
     design time). CalibrationEngine.calibrate() (Phase 2, unmodified)
-    already implements exactly this kind of derivation --
-    clamp(noise_floor * 3.0, 150, 2500) -- so this reuses it verbatim
-    on _run_baseline_observation()'s result rather than inventing a
+    already implements exactly this kind of derivation, so this reuses
+    it on _run_baseline_observation()'s result rather than inventing a
     second formula.
+
+    `engine` here is expected to be a CalibrationEngine constructed with
+    DEFAULT_CONTAMINATION_THRESHOLD_MULTIPLIER (see calibration.py), a
+    dedicated instance separate from the one used later in this
+    function to derive the actual Speech Gate. Contamination detection
+    ("is this block loud enough to be someone talking during what
+    should be a silent window?") is a different question from the
+    Speech Gate ("is this block loud enough to be worth transcribing
+    during normal operation?"), so recalibrating the Speech Gate's own
+    multiplier (docs/designs/ADAPTIVE_CALIBRATION_DESIGN_REVIEW.md,
+    Option 1) must not silently change this threshold too -- Production
+    Verification already confirmed Startup Calibration succeeds under
+    the original multiplier value, and that behavior is left unchanged
+    here.
 
     This is intentionally scoped to Startup Calibration only.
     RecalibrationController (Phase 4, unmodified) is not touched by
@@ -458,12 +472,18 @@ def _perform_startup_calibration(
 
     engine = CalibrationEngine()
 
-    # Temporary reuse of CalibrationEngine's Speech Gate derivation for
-    # Startup Calibration only -- see _derive_dynamic_contamination_threshold()
-    # docstring. Not applied to Recalibration; RecalibrationController
-    # (unmodified) keeps its own fixed default.
+    # docs/designs/ADAPTIVE_CALIBRATION_DESIGN_REVIEW.md, Option 1: a
+    # dedicated CalibrationEngine, kept at
+    # DEFAULT_CONTAMINATION_THRESHOLD_MULTIPLIER, separate from `engine`
+    # above (which now derives the recalibrated Speech Gate). See
+    # _derive_dynamic_contamination_threshold() docstring for why the two
+    # must not share a multiplier. Not applied to Recalibration;
+    # RecalibrationController (unmodified) keeps its own fixed default.
+    contamination_engine = CalibrationEngine(
+        multiplier=DEFAULT_CONTAMINATION_THRESHOLD_MULTIPLIER
+    )
     baseline = _run_baseline_observation(cal_queue, cal_shutdown)
-    dynamic_threshold = _derive_dynamic_contamination_threshold(baseline, engine)
+    dynamic_threshold = _derive_dynamic_contamination_threshold(baseline, contamination_engine)
     _calibration_debug_log(
         f"Dynamic Contamination Threshold: {dynamic_threshold:.1f} RMS "
         f"(baseline_sample_count={baseline.sample_count if baseline else 0})"
