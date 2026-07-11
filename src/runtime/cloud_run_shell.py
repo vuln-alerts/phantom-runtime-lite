@@ -151,10 +151,30 @@ class SessionSpawnError(Exception):
 
 
 def _forward_args(argv: list) -> list:
-    """Strip a leading '--' separator, if present; return the rest verbatim."""
-    if argv and argv[0] == "--":
+    """Return the Runtime CLI args to forward to the spawned child.
+
+    Per this module's documented invocation (`python -m
+    runtime.cloud_run_shell -- <runtime args>`), only args after an
+    explicit '--' separator are meant for the Runtime child; the Shell
+    itself takes no CLI args of its own (PORT/env vars only). Previously,
+    anything given *without* a leading '--' was forwarded verbatim too --
+    so e.g. `--provider openai` (a runtime_client-only flag; provider is
+    per-connection, delivered to the child via the PHANTOM_PROVIDER env
+    var per this module's docstring, never a static Runtime CLI arg) was
+    silently passed straight through to phantom_runtime.py's argparse,
+    which doesn't recognize it and exits 2 on every single spawn attempt
+    -- a permanent connect/disconnect crash loop, not a one-time error.
+    Now: args without a leading '--' are not meant for the Runtime child
+    at all and are dropped (with a warning), so a stray/mistaken flag at
+    the Shell's own invocation can no longer crash every spawned session.
+    """
+    if not argv:
+        return []
+    if argv[0] == "--":
         return argv[1:]
-    return argv
+    _log(f"ignoring args with no leading '--' separator (not forwarded to Runtime child): {argv}")
+    _log("usage: python -m runtime.cloud_run_shell -- <runtime args>")
+    return []
 
 
 def _close_fd(fd: Optional[int]) -> None:

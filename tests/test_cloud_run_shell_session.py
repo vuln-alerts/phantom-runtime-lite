@@ -143,5 +143,37 @@ class TestSpawnSessionFailureCleanup(unittest.TestCase):
                 os.close(fd)  # already closed by the failure path
 
 
+class TestForwardArgs(unittest.TestCase):
+    """
+    _forward_args decides what (if anything) from `python -m
+    runtime.cloud_run_shell <argv>` gets appended to the spawned Runtime
+    child's command line. Regression coverage for the bug where args
+    given without a leading '--' (e.g. `--provider openai`, a
+    runtime_client-only flag -- provider is per-connection, delivered via
+    the PHANTOM_PROVIDER env var, never a static Runtime CLI arg) were
+    forwarded verbatim to phantom_runtime.py's argparse, which doesn't
+    recognize them and exits 2 on every single spawn -- a permanent
+    connect/disconnect crash loop, not a one-time startup error.
+    """
+
+    def test_no_args_forwards_nothing(self):
+        self.assertEqual(crs._forward_args([]), [])
+
+    def test_leading_separator_forwards_the_rest_verbatim(self):
+        self.assertEqual(
+            crs._forward_args(["--", "--audio-source", "fd"]),
+            ["--audio-source", "fd"],
+        )
+
+    def test_bare_separator_forwards_nothing(self):
+        self.assertEqual(crs._forward_args(["--"]), [])
+
+    def test_args_without_leading_separator_are_dropped_not_forwarded(self):
+        # Previously this returned ["--provider", "openai"] verbatim,
+        # which phantom_runtime.py's argparse rejects -- see this class's
+        # docstring.
+        self.assertEqual(crs._forward_args(["--provider", "openai"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()
