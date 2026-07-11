@@ -139,6 +139,36 @@ curl -s http://127.0.0.1:8080/dashboard
 curl -s http://127.0.0.1:8080/    # ブラウザで開くと表形式で表示される
 ```
 
+## Step2-3 の自動化 (scripts/post_dashboard_event.py)
+
+上記Step2-3(`RuntimePipelineOrchestrator.run()` → `POST /aggregate`)を1コマンドで実行するスクリプト。RuntimePipelineOrchestrator / VerificationRuntime / TrustRuntime / DashboardRuntime / EventAggregator / FastAPI・API契約は変更しない。
+
+投入する raw_event は次の優先順位で決まる。
+
+1. `--input PATH` — 指定したJSONファイルを読み込む
+2. 標準入力(stdin) — パイプでJSONが渡された場合に読み込む
+3. どちらも無ければ、Runbook Step2と同じ組み込みサンプルイベントを使用する
+
+```bash
+# 組み込みサンプルイベントを使用
+python scripts/post_dashboard_event.py
+
+# ファイルからraw_eventを読み込む
+python scripts/post_dashboard_event.py \
+    --input sample_event.json
+
+# 標準入力からraw_eventを読み込む
+cat sample_event.json \
+    | python scripts/post_dashboard_event.py
+
+# Cloud Run等、別ホストのFastAPIに投入する場合
+python scripts/post_dashboard_event.py \
+    --url https://xxxxx.run.app \
+    --input sample_event.json
+```
+
+不正なJSONを渡した場合は `ERROR: Invalid Runtime Event JSON` を表示して終了コード1を返す。
+
 ---
 
 # 6. HTTP API
