@@ -285,6 +285,18 @@ class StatelessnessTests(unittest.TestCase):
         r2 = self.client.get("/health")
         self.assertEqual(r1.json(), r2.json())
 
+    def test_aggregate_updates_dashboard_as_a_side_effect(self):
+        # /aggregate's own request/response contract stays independent per
+        # request (see the other tests in this class); this only verifies
+        # the one intentional exception: DashboardService's single latest
+        # slot, which GET /dashboard reads back. See api.dashboard_service.
+        ea = _event_aggregate(trust_score=0.65, trust_level="TRUSTED")
+        self.client.post("/aggregate", json=_payload(ea))
+        response = self.client.get("/dashboard")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["trust_score"], 0.65)
+        self.assertEqual(response.json()["trust_level"], "TRUSTED")
+
 
 class DependencyTests(unittest.TestCase):
     """AST-based dependency inspection: the H4-6 Presentation Layer must
@@ -379,10 +391,17 @@ class DependencyTests(unittest.TestCase):
             "asdict",
             "fastapi",
             "FastAPI",
+            "HTTPException",
+            "fastapi.responses",
+            "HTMLResponse",
             "aggregator.event_aggregate",
             "EventAggregate",
             "api.api_models",
             "HealthResponse",
+            "api.dashboard_service",
+            "DashboardService",
+            "api.dashboard_view",
+            "render_dashboard_html",
         )
         for name in imported:
             self.assertTrue(

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Phantom Runtime Lite — Dashboard</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; background: #0e1116; color: #e6e6e6; margin: 0; padding: 2rem; }
+  h1 { font-size: 1.25rem; font-weight: 600; margin-bottom: 1.5rem; }
+  table { border-collapse: collapse; width: 100%; max-width: 640px; }
+  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid #2a2f3a; vertical-align: top; }
+  th { color: #9aa4b2; font-weight: 500; width: 45%; }
+  td { color: #f2f2f2; }
+  .refresh { color: #6b7280; font-size: 0.85rem; margin-top: 1.5rem; }
+</style>
+</head>
+<body>
+<h1>Phantom Runtime Lite — Dashboard</h1>
+<table>
+  <tr><th>Trust Score</th><td>$trust_score</td></tr>
+  <tr><th>Trust Level</th><td>$trust_level</td></tr>
+  <tr><th>Reliability Score</th><td>$reliability_score</td></tr>
+  <tr><th>Gap Detected</th><td>$gap_detected</td></tr>
+  <tr><th>Fallback Detected</th><td>$fallback_detected</td></tr>
+  <tr><th>Human Review Required</th><td>$human_review_required</td></tr>
+  <tr><th>Review Reason</th><td>$review_reason</td></tr>
+  <tr><th>Warnings</th><td>$warnings</td></tr>
+  <tr><th>Session ID</th><td>$session_id</td></tr>
+  <tr><th>Event ID</th><td>$event_id</td></tr>
+  <tr><th>Timestamp</th><td>$timestamp</td></tr>
+</table>
+<p class="refresh">Shows the latest DashboardResult only. Reload the page for updates.</p>
+</body>
+</html>
