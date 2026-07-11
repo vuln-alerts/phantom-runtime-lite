@@ -58,14 +58,15 @@ from typing import NamedTuple, Optional
 import numpy as np
 import sounddevice as sd
 from dotenv import load_dotenv
-from openai import OpenAI, APITimeoutError, APIConnectionError, RateLimitError
 
-# H2A-5: Provider Interface for LLM chat completions. `openai` above remains
-# in use only for Whisper audio transcription (client.audio.transcriptions),
-# which is outside the Provider Interface's scope (chat-completion-shaped
-# models only) — see the static provider instances below for detail.
+# H2A-5: Provider Interface for LLM chat completions. Speech-to-Text Provider
+# Interface (see provider.speech_provider) covers audio transcription — the
+# Runtime Core no longer imports the openai SDK directly for either concern.
 from provider.openai_provider import OpenAIProvider
 from provider.gemini_provider import GeminiProvider
+from provider.openai_speech_provider import OpenAISpeechProvider
+from provider.gemini_speech_provider import GeminiSpeechProvider
+from provider.speech_provider import SpeechToTextRequest, detect_language_from_text
 from provider.models import (
     Message,
     ProviderRequest,
@@ -76,6 +77,7 @@ from provider.models import (
     StreamingTextDelta,
 )
 from provider.errors import (
+    RuntimeProviderError,
     RuntimeRateLimitError,
     RuntimeTimeoutError,
 )
@@ -199,6 +201,8 @@ except ImportError:
 
 from audio.vad_buffering import VADBuffer as _VADBuffer
 
+import runtime_trace
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Path resolution — standalone-safe
 # ─────────────────────────────────────────────────────────────────────────────
@@ -312,6 +316,24 @@ def _build_parser() -> argparse.ArgumentParser:
 args = _build_parser().parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
+# .env loading — MUST run before RuntimeConfig.from_env() (below) and before
+# any other os.getenv() key lookup in this file. Previously load_dotenv() was
+# called after _cfg = _RuntimeConfig.from_env(), so a key that only existed in
+# .env (never exported in the parent shell) was still "" inside _cfg by the
+# time it was read -- reproduced exactly by GEMINI_API_KEY, which is only ever
+# read via _cfg.gemini_api_key (config.py's from_env()), while OPENAI_API_KEY
+# happened to work because it's read via a fresh os.getenv() call further
+# below, after load_dotenv() had already run.
+#
+# Anchored to the repository root (parent of this file's own directory, via
+# __file__) rather than find_dotenv()'s implicit frame/cwd-based search, so
+# resolution is identical no matter what cwd this process (or the
+# runtime.cloud_run_shell parent that may have spawned it) was launched from.
+# ─────────────────────────────────────────────────────────────────────────────
+_REPO_ROOT_EARLY = _os.path.dirname(_SCRIPT_DIR_EARLY)
+load_dotenv(_os.path.join(_REPO_ROOT_EARLY, ".env"))
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Configuration precedence (deterministic — Issue 8)
 # ─────────────────────────────────────────────────────────────────────────────
 # Priority (highest first):
@@ -330,27 +352,30 @@ else:
     _cfg = None   # fallback: use argparse values directly throughout
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Startup validation — API key
+# Provider selection + startup validation — API key
 # ─────────────────────────────────────────────────────────────────────────────
-load_dotenv()
 
-_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-if not _api_key or not _api_key.startswith("sk-"):
-    print("ERROR: OPENAI_API_KEY not set or invalid.", file=sys.stderr)
-    print("  Set it in a .env file or as an environment variable.", file=sys.stderr)
-    sys.exit(1)
+# H5-1: the provider for this Runtime session is selected via PHANTOM_PROVIDER
+# -- an env var set only on this specific subprocess by
+# runtime.cloud_run_shell's session_factory (mirrors the existing
+# PHANTOM_AUDIO_FD / PHANTOM_EVENT_FD pattern), never a deployment-wide
+# PROVIDER setting. When _cfg is unavailable (config module failed to
+# import), the provider defaults to "openai", preserving pre-H5-1
+# standalone behavior exactly.
+_requested_provider = os.getenv("PHANTOM_PROVIDER", "openai").strip().lower() or "openai"
+_selected_provider = _requested_provider if _cfg is not None else "openai"
 
-client = OpenAI(api_key=_api_key, timeout=20.0)
-
-# H2A-5: static Provider Interface instances for LLM chat completions.
-# `client` above remains in use ONLY for Whisper audio transcription
-# (client.audio.transcriptions.create) — out of scope for the Provider
-# Interface, whose models are chat-completion-shaped only. Whisper
-# therefore always uses OpenAI regardless of the selected provider below
-# (intentional scope boundary — see ROADMAP_V10.md H2A notes).
+# API key validation happens per selected provider (not unconditionally for
+# OpenAI) so a Gemini session never requires OPENAI_API_KEY to be set, and
+# vice versa -- each provider's Runtime child only ever needs its own key.
 #
-# Three statically-configured instances preserve the exact timeout value
-# already used by each existing call site (Behavioral Compatibility):
+# H2A-5 / this change: static Provider Interface instances for LLM chat
+# completions, plus one Speech-to-Text Provider instance for audio
+# transcription (provider.speech_provider) -- both selected by the same
+# _selected_provider, so `--provider gemini` switches STT and LLM together
+# with no separate flag. Three statically-configured LLM instances preserve
+# the exact timeout value already used by each existing call site
+# (Behavioral Compatibility):
 #   - _provider_default:    matches this client's own default (20.0s) —
 #                           used by every buffered call site that never
 #                           overrode the timeout.
@@ -358,26 +383,32 @@ client = OpenAI(api_key=_api_key, timeout=20.0)
 #   - _provider_streaming:  both streaming call sites explicitly used
 #                           45.0s for stream establishment.
 # No routing, no factory — plain static construction, per H2A-5 scope.
-#
-# H5-1: the concrete class constructed here is now selected per Runtime
-# session via PHANTOM_PROVIDER -- an env var set only on this specific
-# subprocess by runtime.cloud_run_shell's session_factory (mirrors the
-# existing PHANTOM_AUDIO_FD / PHANTOM_EVENT_FD pattern), never a
-# deployment-wide PROVIDER setting. This remains a construction-site
-# branch only — no dispatch layer, no factory, no DI. When _cfg is
-# unavailable (config module failed to import), the provider defaults to
-# "openai", preserving pre-H5-1 standalone behavior exactly.
-_requested_provider = os.getenv("PHANTOM_PROVIDER", "openai").strip().lower() or "openai"
-_selected_provider = _requested_provider if _cfg is not None else "openai"
-
 if _selected_provider == "gemini":
+    if not _cfg.gemini_api_key:
+        print("ERROR: GEMINI_API_KEY not set.", file=sys.stderr)
+        print("  Set it in a .env file or as an environment variable.", file=sys.stderr)
+        sys.exit(1)
+
     _provider_default    = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=20.0)
     _provider_candidates = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=30.0)
     _provider_streaming  = GeminiProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=45.0)
+    _stt_provider         = GeminiSpeechProvider(api_key=_cfg.gemini_api_key, model=_cfg.gemini_model, timeout=30.0)
 else:
+    _api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not _api_key or not _api_key.startswith("sk-"):
+        print("ERROR: OPENAI_API_KEY not set or invalid.", file=sys.stderr)
+        print("  Set it in a .env file or as an environment variable.", file=sys.stderr)
+        sys.exit(1)
+
     _provider_default    = OpenAIProvider(api_key=_api_key, model=args.gpt_model, timeout=20.0)
     _provider_candidates = OpenAIProvider(api_key=_api_key, model=args.gpt_model, timeout=30.0)
     _provider_streaming  = OpenAIProvider(api_key=_api_key, model=args.gpt_model, timeout=45.0)
+    _stt_provider         = OpenAISpeechProvider(api_key=_api_key, model=args.whisper_model, timeout=30.0)
+
+# Display-only label for the selected Speech-to-Text provider (keyboard help
+# text / meeting-flush status lines) -- purely cosmetic, does not affect
+# _stt_provider selection above.
+_STT_DISPLAY_LABEL = "Gemini" if _selected_provider == "gemini" else "Whisper"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Debug Flags
@@ -495,30 +526,6 @@ class _StaticMemoryProvider:
         return self._block
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model capability registry
-# ─────────────────────────────────────────────────────────────────────────────
-# Fix 8: Structured capability map replaces the flat frozenset.
-# Adding a new model = adding one entry here. All consumers use MODEL_CAPS lookup.
-MODEL_CAPS: dict[str, dict[str, bool]] = {
-    "whisper-1": {
-        "verbose_json":    True,   # returns result.language field
-        "supports_prompt": True,   # accepts prompt= parameter for context seeding
-    },
-    "gpt-4o-transcribe": {
-        "verbose_json":    False,
-        "supports_prompt": False,  # may 400 on some API versions
-    },
-    "gpt-4o-mini-transcribe": {
-        "verbose_json":    False,
-        "supports_prompt": False,
-    },
-}
-
-def _model_cap(model: str, cap: str, default: bool = False) -> bool:
-    """Lookup a capability for a model. Returns default if model is unknown."""
-    return MODEL_CAPS.get(model.lower(), {}).get(cap, default)
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Queues
 # ─────────────────────────────────────────────────────────────────────────────
 audio_queue:      queue.Queue = queue.Queue(maxsize=AUDIO_QUEUE_MAXSIZE)
@@ -527,6 +534,15 @@ audio_queue:      queue.Queue = queue.Queue(maxsize=AUDIO_QUEUE_MAXSIZE)
 # Rationale: at maxsize=2, a single 2s GPT delay caused the next 2 chunks to be
 # dropped entirely. At maxsize=4 the worker can absorb a ~6s spike before dropping.
 transcript_queue: queue.Queue = queue.Queue(maxsize=4)
+
+# Debug-only counters for the Runtime Pipeline stall investigation (see
+# runtime_trace.py). Read, not decision-making: nothing branches on these.
+_queue_metrics = {
+    "audio_full_count":      0,
+    "audio_drop_count":      0,
+    "transcript_full_count": 0,
+    "transcript_drop_count": 0,
+}
 
 
 def _enqueue_latest(audio: np.ndarray) -> None:
@@ -541,10 +557,20 @@ def _enqueue_latest(audio: np.ndarray) -> None:
             break
     if drained:
         show_warn(f"Queue: dropped {drained} stale chunk(s) — keeping latest")
+        _queue_metrics["transcript_drop_count"] += drained
     try:
         transcript_queue.put_nowait(audio)
+        if runtime_trace.enabled():
+            runtime_trace.emit(
+                "transcript_queue enqueue",
+                event_id=runtime_trace.next_event_id("tq"),
+                qsize=transcript_queue.qsize(),
+                maxsize=transcript_queue.maxsize,
+                drained=drained,
+            )
     except queue.Full:
         show_warn("Worker busy — chunk skipped (will resume next utterance)")
+        _queue_metrics["transcript_full_count"] += 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -566,6 +592,12 @@ class LogEntry(NamedTuple):
 
 transcript_log: deque = deque(maxlen=200)   # raised from 80: supports 30-60 min enterprise calls
 _shutdown = threading.Event()
+
+# Debug-only state for the Runtime Pipeline stall investigation (see
+# runtime_trace.py). line_no is monotonic and unaffected by transcript_log's
+# maxlen eviction, unlike len(transcript_log). Read, not decision-making.
+_conversation_state = {"line_no": 0, "last_ts": None, "last_text": None}
+_runtime_event_state = {"last_event_id": None, "last_event_ts": None}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Typed event transport (H3 client-cloud integration)
@@ -596,6 +628,16 @@ def _init_event_transport() -> None:
 
 def _emit_event(event_type: str, **payload) -> None:
     """Write one versioned JSON event line: {version, type, timestamp, payload}."""
+    _trace_evt_id = runtime_trace.next_event_id("evt") if runtime_trace.enabled() else ""
+    if runtime_trace.enabled():
+        runtime_trace.emit(
+            "Runtime Event EMIT",
+            event_id=_trace_evt_id,
+            event_type=event_type,
+            event_fd_open=_event_file is not None,
+        )
+    _runtime_event_state["last_event_id"] = _trace_evt_id or None
+    _runtime_event_state["last_event_ts"] = time.time()
     if _event_file is None:
         return
     envelope = {
@@ -1514,49 +1556,9 @@ def _infer_speaker(lang: str, text: str = "") -> str:
     return result
 
 
-def detect_language_from_text(text: str) -> str:
-    """
-    Fix 5: Improved mixed JP/EN language detection.
-
-    Strategy (no deps, <0.1ms):
-      1. Any hiragana, katakana, or JP punctuation → "japanese" immediately.
-         These codepoints are exclusive to Japanese text.
-      2. Kanji present with adaptive threshold:
-           len ≤ 25 chars: any kanji → "japanese"  (short fragments are almost always JP)
-           len > 25 chars: kanji/total ≥ 5%  → "japanese"
-         Old threshold was 10%, which missed "compliance経験 risk management" (7.1%).
-         5% catches sparse kanji in mixed EN/JP sentences without false-positives
-         on pure English text (which has 0% kanji).
-      3. Otherwise → "english"
-
-    Tested on 19 interview cases including mixed JP/EN with romaji-heavy text.
-    """
-    if not text:
-        return "unknown"
-
-    # Step 1: unambiguous JP codepoints (single-pass, early exit)
-    for ch in text:
-        cp = ord(ch)
-        if 0x3040 <= cp <= 0x309F: return "japanese"   # hiragana
-        if 0x30A0 <= cp <= 0x30FF: return "japanese"   # katakana
-        if 0xFF65 <= cp <= 0xFF9F: return "japanese"   # halfwidth kana
-        if 0x3000 <= cp <= 0x303F: return "japanese"   # JP punctuation 。、「」…
-
-    # Step 2: kanji with adaptive threshold
-    kanji = sum(1 for ch in text
-                if 0x3400 <= ord(ch) <= 0x4DBF   # CJK Extension A
-                or 0x4E00 <= ord(ch) <= 0x9FFF)  # CJK Unified (main block)
-
-    if kanji == 0:
-        return "english"
-
-    if len(text) <= 25:
-        return "japanese"   # any kanji in a short string → JP
-
-    if kanji / len(text) >= 0.05:
-        return "japanese"
-
-    return "english"
+# detect_language_from_text moved to provider.speech_provider (imported above)
+# -- shared by both OpenAISpeechProvider and GeminiSpeechProvider as their
+# language-detection fallback; this call site is unaffected.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1941,24 +1943,55 @@ def is_silent(block: np.ndarray) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Whisper transcription
+# Speech-to-Text transcription (provider.speech_provider — OpenAI Whisper or
+# Gemini, selected by _selected_provider / _stt_provider above)
 # ─────────────────────────────────────────────────────────────────────────────
-_RETRYABLE       = (APIConnectionError, APITimeoutError)
-_WHISPER_PROMPT_SEED = "はい、えーと、そうですね。OK, so, right, yeah."
+_SPEECH_PROMPT_SEED = "はい、えーと、そうですね。OK, so, right, yeah."
+
+# Debug-only counters for the Runtime Pipeline stall investigation (see
+# runtime_trace.py). Read, not decision-making: nothing branches on these.
+_speech_metrics = {
+    "call_count":         0,
+    "last_start_ts":      None,
+    "last_end_ts":        None,
+    "last_success_ts":    None,
+    "last_failure_ts":    None,
+    "last_exception":     None,
+}
 
 
-def _build_whisper_prompt() -> str:
+def _build_speech_prompt() -> str:
     with _log_lock:
         recent = list(transcript_log)[-2:]
     if recent:
         return " ".join(e.text for e in recent)[-300:]
-    return _WHISPER_PROMPT_SEED
+    return _SPEECH_PROMPT_SEED
+
+
+def _speech_end(event_id: str, success: bool, exc: Optional[BaseException] = None) -> None:
+    """Debug-only: record Speech-to-Text call outcome metrics/trace (see runtime_trace.py)."""
+    now = time.time()
+    _speech_metrics["last_end_ts"] = now
+    if success:
+        _speech_metrics["last_success_ts"] = now
+    else:
+        _speech_metrics["last_failure_ts"] = now
+        _speech_metrics["last_exception"] = str(exc) if exc is not None else None
+    if runtime_trace.enabled():
+        runtime_trace.emit(
+            "Speech END", event_id=event_id, provider=_selected_provider,
+            success=success, exception=(str(exc) if exc is not None else None),
+        )
 
 
 def transcribe(audio: np.ndarray) -> tuple[str, str]:
     """
-    Returns (text, detected_language).
-    Uses MODEL_CAPS registry to select response_format and prompt usage.
+    Returns (text, detected_language). Delegates the actual SDK call to
+    _stt_provider (provider.speech_provider.SpeechToTextProvider) — this
+    function owns only Runtime-level policy: debug truncation, prompt
+    seeding from recent transcript, retry-once-on-timeout, and
+    trace/metrics recording. No SDK exception type is referenced here;
+    only the Runtime-standard provider.errors hierarchy is.
     v17.2: per-call timeout + trace logging + full exception visibility.
     """
     # In debug-short-mode, truncate audio to 5 seconds
@@ -1968,64 +2001,65 @@ def transcribe(audio: np.ndarray) -> tuple[str, str]:
             audio = audio[:max_samples]
             _trace("transcribe/truncated", f"audio trimmed to 5s for debug-short-mode")
 
-    wav_buf      = make_wav_buffer(audio)
-    use_verbose  = _model_cap(args.whisper_model, "verbose_json")
-    use_prompt   = _model_cap(args.whisper_model, "supports_prompt")
-    fmt          = "verbose_json" if use_verbose else "json"
-    extra: dict  = {}
-    if use_prompt:
-        extra["prompt"] = _build_whisper_prompt()
+    wav_bytes = make_wav_buffer(audio).getvalue()
+    request = SpeechToTextRequest(
+        audio_wav=wav_bytes,
+        sample_rate=SAMPLE_RATE,
+        prompt=_build_speech_prompt(),
+    )
 
-    _trace("transcribe/start", f"model={args.whisper_model} fmt={fmt} audio={len(audio)/SAMPLE_RATE:.1f}s")
+    _trace("transcribe/start", f"provider={_selected_provider} audio={len(audio)/SAMPLE_RATE:.1f}s")
+
+    _speech_metrics["call_count"] += 1
+    _speech_metrics["last_start_ts"] = time.time()
+    _trace_event_id = runtime_trace.next_event_id("speech") if runtime_trace.enabled() else ""
+    if runtime_trace.enabled():
+        runtime_trace.emit(
+            "Speech START", event_id=_trace_event_id, provider=_selected_provider,
+            audio_sec=round(len(audio) / SAMPLE_RATE, 2),
+        )
+
+    _label = f"Speech-to-Text ({_selected_provider})"
 
     for attempt in range(2):
         try:
-            # Per-call timeout: 30s hard limit on Whisper regardless of client default
-            result = client.audio.transcriptions.create(
-                file=wav_buf,
-                model=args.whisper_model,
-                response_format=fmt,
-                temperature=0.0,
-                timeout=30.0,
-                **extra,
-            )
-
-            text = (result.text or "").strip()
-            lang = (
-                (getattr(result, "language", None) or "unknown")
-                if use_verbose
-                else detect_language_from_text(text)
-            )
+            response = _stt_provider.transcribe(request)
+            text = response.text
+            lang = response.language
             _trace("transcribe/done", f"lang={lang} text_len={len(text)} preview={text[:80]!r}")
+            _speech_end(_trace_event_id, success=True)
             return text, lang
 
-        except _RETRYABLE as e:
+        except RuntimeTimeoutError as e:
             if attempt == 0:
                 _trace("transcribe/retry", str(e))
-                show_warn(f"Whisper retrying… ({e})")
-                wav_buf = make_wav_buffer(audio)
+                show_warn(f"{_label} retrying… ({e})")
                 time.sleep(0.3)
             else:
                 import traceback as _tb
-                show_err("Whisper", e)
+                show_err(_label, e)
                 _trace("transcribe/FAILED", str(e))
-                print("[ERROR] Whisper RETRYABLE failure:", e, flush=True)
+                print(f"[ERROR] {_label} RETRYABLE failure:", e, flush=True)
                 _tb.print_exc()
+                _speech_end(_trace_event_id, success=False, exc=e)
                 return "", "unknown"
-        except RateLimitError as e:
+        except RuntimeRateLimitError as e:
             import traceback as _tb
-            show_err("Whisper rate limit", f"API quota exceeded. ({e})")
+            show_err(f"{_label} rate limit", f"API quota exceeded. ({e})")
             _trace("transcribe/RATELIMIT", str(e))
             _tb.print_exc()
+            _speech_end(_trace_event_id, success=False, exc=e)
             return "", "unknown"
-        except Exception as e:
+        except RuntimeProviderError as e:
             import traceback as _tb
-            show_err("Whisper", e)
+            show_err(_label, e)
             _trace("transcribe/EXCEPTION", str(e))
-            print("[ERROR] Whisper unexpected exception:", e, flush=True)
+            print(f"[ERROR] {_label} unexpected exception:", e, flush=True)
             _tb.print_exc()
+            _speech_end(_trace_event_id, success=False, exc=e)
             return "", "unknown"
 
+    _speech_end(_trace_event_id, success=False, exc=None)
     return "", "unknown"
 
 
@@ -3048,9 +3082,22 @@ def reply_worker() -> None:
             debug_runtime("after empty-text check — text is non-empty")
 
             debug_runtime("before is_meaningful")
-            if not is_meaningful(text):
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "Hallucination Guard START",
+                    event_id=runtime_trace.next_event_id("guard"),
+                    text_preview=text[:60],
+                )
+            _meaningful = is_meaningful(text)
+            if not _meaningful:
                 _trace("reply_worker/not_meaningful", f"filtered: {text[:60]!r}")
                 continue
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "Hallucination Guard PASS",
+                    event_id=runtime_trace.next_event_id("guard"),
+                    text_preview=text[:60],
+                )
             debug_runtime("after is_meaningful — text passed filter")
 
             debug_runtime("before time.strftime")
@@ -3101,6 +3148,17 @@ def reply_worker() -> None:
             entry = LogEntry(text=text, lang=lang, ts=ts, speaker=speaker)
             with _log_lock:
                 transcript_log.append(entry)
+                _conversation_state["line_no"] += 1
+                _conversation_state["last_ts"] = ts
+                _conversation_state["last_text"] = text
+                _line_no = _conversation_state["line_no"]
+            if runtime_trace.enabled():
+                runtime_trace.emit(
+                    "Conversation APPEND",
+                    event_id=runtime_trace.next_event_id("conv"),
+                    line_no=_line_no, ts=ts, speaker=speaker,
+                    text_preview=text[:60],
+                )
             _emit_event("transcript", text=text, lang=lang, ts=ts, speaker=speaker)
             # Persist outside lock — safe because _persist_entry has its own write lock
             _trace("reply_worker/persisting")
@@ -3278,11 +3336,19 @@ def _audio_callback(indata, frames, time_info, status) -> None:
         _audio_callback._last_status = str(status)
     try:
         audio_queue.put_nowait(indata.copy())
+        if runtime_trace.enabled():
+            runtime_trace.emit(
+                "audio_queue enqueue",
+                event_id=runtime_trace.next_event_id("aq"),
+                qsize=audio_queue.qsize(), maxsize=audio_queue.maxsize,
+            )
     except queue.Full:
         # Count and timestamp overflow — report safely in record_audio, not here
         with _audio_overflow_lock:
             _audio_overflow_count += 1
             _overflow_window.append(time.monotonic())
+        _queue_metrics["audio_full_count"] += 1
+        _queue_metrics["audio_drop_count"] += 1
 
 _audio_callback._last_status = None  # type: ignore[attr-defined]
 
@@ -3323,9 +3389,13 @@ def _record_audio_from_fd() -> None:
         try:
             chunk = os.read(fd, 65536)
         except OSError as e:
+            if runtime_trace.enabled():
+                runtime_trace.emit("WebSocket RECEIVE", event_id="fd-read-error", exception=str(e))
             show_err("Audio", f"fd read failed: {e}")
             break
         if not chunk:
+            if runtime_trace.enabled():
+                runtime_trace.emit("WebSocket RECEIVE", event_id="fd-eof", exception="fd closed by transport")
             show_info("[audio] fd closed by transport — audio-in ended")
             break
 
@@ -3337,10 +3407,18 @@ def _record_audio_from_fd() -> None:
             del buf[:block_bytes]
             try:
                 audio_queue.put_nowait(block.copy())
+                if runtime_trace.enabled():
+                    runtime_trace.emit(
+                        "audio_queue enqueue",
+                        event_id=runtime_trace.next_event_id("aq"),
+                        qsize=audio_queue.qsize(), maxsize=audio_queue.maxsize,
+                    )
             except queue.Full:
                 with _audio_overflow_lock:
                     _audio_overflow_count += 1
                     _overflow_window.append(time.monotonic())
+                _queue_metrics["audio_full_count"] += 1
+                _queue_metrics["audio_drop_count"] += 1
 
 
 def record_audio() -> None:
@@ -9162,7 +9240,7 @@ _HELP_MANUAL = "\n".join([
     f"{GRAY}{'─'*40}{RESET}",
     f"{BOLD}キー操作 / Keyboard Commands  [MANUAL-FLUSH MODE]{RESET}",
     f"  {BOLD}r{RESET}      toggle recording ●ON / ○OFF      {GRAY}(no API — instant){RESET}",
-    f"  {BOLD}g{RESET}      ★ FLUSH → Whisper → ミーティング分析 {GRAY}(main action){RESET}",
+    f"  {BOLD}g{RESET}      ★ FLUSH → {_STT_DISPLAY_LABEL} → ミーティング分析 {GRAY}(main action){RESET}",
     f"  {BOLD}G{RESET}      インタビューまとめ生成",
     f"  {BOLD}h{RESET}      hold phrase    {GRAY}[HOLD]{RESET}  (no API)",
     f"  {BOLD}u{RESET}      clarify/repeat {GRAY}[REPEAT]{RESET} (no API — instant)",
@@ -9270,6 +9348,22 @@ def health_monitor() -> None:
             show_warn(f"[health] DEAD THREADS: {dead} — runtime may be stalled!")
         _trace("health/threads", f"alive={list(threads_alive.keys())}")
         _trace("health/queues", f"audio_q={aq} transcript_q={tq} overflow_rate={rate:.1f}/min")
+
+        if runtime_trace.enabled():
+            runtime_trace.emit(
+                "PIPELINE STATE SNAPSHOT",
+                event_id=runtime_trace.next_event_id("snapshot"),
+                audio_queue={"size": aq, "maxsize": AUDIO_QUEUE_MAXSIZE,
+                             "full_count": _queue_metrics["audio_full_count"],
+                             "drop_count": _queue_metrics["audio_drop_count"]},
+                transcript_queue={"size": tq, "maxsize": transcript_queue.maxsize,
+                                   "full_count": _queue_metrics["transcript_full_count"],
+                                   "drop_count": _queue_metrics["transcript_drop_count"]},
+                speech=dict(_speech_metrics),
+                conversation=dict(_conversation_state),
+                runtime_event=dict(_runtime_event_state),
+                threads_alive=threads_alive,
+            )
 
         for _ in range(interval * 10):
             if _shutdown.is_set():
@@ -9400,7 +9494,7 @@ def keyboard_loop() -> None:
                         if _ENV["DEBUG_AUDIO_SAVE"]:
                             _save_debug_audio(merged)
                         _set_runtime_mode(RuntimeMode.MEETING)
-                        show_info(f"[meeting] {len(merged)/SAMPLE_RATE:.1f}s → Whisper → ミーティング分析…")
+                        show_info(f"[meeting] {len(merged)/SAMPLE_RATE:.1f}s → {_STT_DISPLAY_LABEL} → ミーティング分析…")
                         _enqueue_latest(merged)
                     else:
                         show_info("[meeting] バッファ空 — 現在のログで分析中…")
@@ -9537,7 +9631,7 @@ def control_loop() -> None:
                         if _ENV["DEBUG_AUDIO_SAVE"]:
                             _save_debug_audio(merged)
                         _set_runtime_mode(RuntimeMode.MEETING)
-                        show_info(f"[meeting] {len(merged)/SAMPLE_RATE:.1f}s → Whisper → ミーティング分析…")
+                        show_info(f"[meeting] {len(merged)/SAMPLE_RATE:.1f}s → {_STT_DISPLAY_LABEL} → ミーティング分析…")
                         _enqueue_latest(merged)
                     else:
                         show_info("[meeting] バッファ空 — 現在のログで分析中…")
