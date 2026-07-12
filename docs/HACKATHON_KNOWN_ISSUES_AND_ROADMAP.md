@@ -1,7 +1,8 @@
 # Hackathon Submission Notes
 
-> **Status:** ドキュメントのみ。本ファイルの追加にあたりコード・テスト・README・ROADMAPへの変更は一切行っていない。
+> **Status:** ドキュメントのみ。ソースコード・テストへの変更は一切行っていない。
 > **Purpose:** Hackathon提出版の現状(実装済み範囲)、既知の制約・課題、および提出後の改善計画・設計方針を明示的に記録する。
+> **Last Updated:** 2026-07-12 — §3 Known Bugsを、`docs/bugs/`配下に記録済みの2件のOpen Bug（Gemini WebSocket 1011/409再発、reconnect後の`g`キー表示停止）で更新（Release Candidate Review指摘の是正）。
 
 ---
 
@@ -39,9 +40,12 @@ Hackathon提出版として実装済みの主な構成要素。
 
 ## 3. Known Bugs
 
-現在、コードレベルで不具合として確定的に再現・特定できているもの。
+現在、コードレベルで不具合として確定的に再現・特定できているもの。`docs/bugs/`配下のBug Reportで管理する。
 
-- 該当なし(本ドキュメント作成時点で、再現条件・原因箇所ともにコード上確定できている不具合は確認されていない)。
+- **[Status: Open, 2026-07-12] Gemini構成で、WebSocketの`1011`（keepalive ping timeout）→再接続時`409`（reconnect conflict）が再発する。** OpenAI構成では現時点で未再現。TransportGateway teardown修正適用後も再発しており、原因（TransportGateway/Gemini SDK/WebSocketライブラリ/runtime_client/reply_workerのいずれか）は未特定。詳細: [docs/bugs/BUG-2026-07-12-gemini-websocket-1011-keepalive-409-reconnect-recurrence.md](bugs/BUG-2026-07-12-gemini-websocket-1011-keepalive-409-reconnect-recurrence.md)。
+- **[Status: Open, 2026-07-11] WebSocket reconnect後、`g`キー（Runtime Event表示）が動作しなくなる。** Conversation自体・`l`キー（Conversation History表示）は再接続後も正常動作する。Root Causeは未特定。詳細: [docs/bugs/BUG-2026-07-11-runtime-event-display-stops-after-reconnect.md](bugs/BUG-2026-07-11-runtime-event-display-stops-after-reconnect.md)。
+
+上記2件以外に、本ドキュメント作成時点で再現条件・原因箇所ともにコード上確定できている不具合は確認されていない。
 
 ### Observed Behavior(バグと断定できないもの)
 

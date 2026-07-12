@@ -1,9 +1,9 @@
 # Phantom Runtime Lite Runbook
 
-**Version:** H5-1  
+**Version:** H5-1.1  
 **Status:** Production (Hackathon Submission)  
 **Platform:** Google Cloud Run  
-**Last Updated:** 2026-07-07
+**Last Updated:** 2026-07-12（OpenAI正式デモ構成・Gemini Known Issue明記、Release Candidate Review指摘の是正）
 
 ---
 
@@ -56,6 +56,8 @@ wss://<HOST>/ws?provider=gemini
 ```
 
 環境変数によるProvider切替は行いません。
+
+**Provider構成の位置付け**: 本Hackathon提出における正式デモ構成は **OpenAI**（`provider=openai`）である。Geminiは動作するが、WebSocketの`1011`（keepalive ping timeout）→ 再接続時`409`（reconnect conflict）が再発する既知の未解決事象（Status: Open）があるため、**Known Issue**として扱う（[docs/bugs/BUG-2026-07-12-gemini-websocket-1011-keepalive-409-reconnect-recurrence.md](bugs/BUG-2026-07-12-gemini-websocket-1011-keepalive-409-reconnect-recurrence.md)参照。OpenAI構成では現時点で本事象は未再現）。§11.2/§11.3・§17ではOpenAI/Geminiの接続確認手順自体は引き続き両方記載するが、Operator E2E・Demoの正式実施はOpenAI構成で行う。
 
 ---
 
@@ -777,6 +779,13 @@ ws://
   連続した`reply` Typed Eventに対しClient側TTSが短時間に連続して`speak()`を呼ぶ際、
   PortAudio側のストリーム再オープンが競合して起きる非致命的なエラー（例外は発生せず、
   該当発話の再生のみスキップされ、後続の発話は正常に再生される）。ローカルE2Eで2回観測。
+- **[2026-07-12確認、Status: Open] Gemini構成で、WebSocketの`1011`（keepalive ping timeout）→
+  再接続時`409`（reconnect conflict）が再発する既知の未解決事象がある。** OpenAI構成では
+  現時点で未再現。TransportGateway teardown修正（`docs/bugs/FIX-2026-07-12-transport-gateway-session-teardown-blocks-event-loop.md`）
+  適用後も再発しており、原因（TransportGateway/Gemini SDK/WebSocketライブラリ/runtime_client/
+  reply_workerのいずれか）は未特定。この未解決事象があるため、**本Hackathon提出の正式デモ構成は
+  OpenAIとし、Geminiは Known Issue として扱う**。詳細は
+  [docs/bugs/BUG-2026-07-12-gemini-websocket-1011-keepalive-409-reconnect-recurrence.md](bugs/BUG-2026-07-12-gemini-websocket-1011-keepalive-409-reconnect-recurrence.md)を参照。
 
 ---
 

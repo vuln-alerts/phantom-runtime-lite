@@ -1,9 +1,9 @@
 # Runbook — Dashboard閲覧機能 (RuntimePipelineOrchestrator / DashboardService / GET /dashboard / GET /)
 
-**Version:** 1.1
+**Version:** 1.2
 **Target Feature:** Hackathon提出物 — Runtime Pipeline Orchestrator (`src/runtime/pipeline_orchestrator.py`), DashboardService (`src/api/dashboard_service.py`), Dashboard View (`src/api/dashboard_view.py`, `src/api/templates/`), FastAPI拡張 (`GET /dashboard`, `GET /`)
-**Related:** `docs/RUNBOOK_RUNTIME_VERIFICATION.md`（Verification/Trust/Dashboard Runtime・FastAPI起動手順の詳細）, `docs/H4_RUNTIME_EVENT_CONTRACT.md`（Frozen）, `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §11（TransportGateway Session Lifecycle Verification — WebSocket層の`1011`/`409`切り分け）
-**Last Updated:** 2026-07-12
+**Related:** `docs/RUNBOOK_RUNTIME_VERIFICATION.md`（Verification/Trust/Dashboard Runtime・FastAPI起動手順の詳細）, `docs/H4_RUNTIME_EVENT_CONTRACT.md`（Frozen）, `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §3.1/§8/§10.6（TransportGateway Health監視・Runtime Trace・WebSocket層の`1011`/`409`切り分け）
+**Last Updated:** 2026-07-12（v1.2、Release Candidate Review指摘の是正）
 
 ---
 
@@ -78,10 +78,12 @@ EventAggregateを組み立てる、どの呼び出し元でも良い。RuntimePi
 
 `uvicorn` は `requirements.txt` に含まれていない(既知のギャップ)。
 
+既定ポートは **`8081`**（`README.md`/`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §4.1と統一）。理由: Runtimeをローカル Docker（`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §2.2）で動かす場合、Runtimeは8080番を使用するため、Dashboard APIを8080のままにすると `[Errno 48] Address already in use` で起動できない。
+
 ```bash
 cd src
 pip install uvicorn
-python -m uvicorn api.api_server:app --host 127.0.0.1 --port 8080
+python -m uvicorn api.api_server:app --host 127.0.0.1 --port 8081
 ```
 
 ---
@@ -91,9 +93,9 @@ python -m uvicorn api.api_server:app --host 127.0.0.1 --port 8080
 ## Step1 まだ何も投入していない状態を確認
 
 ```bash
-curl -s -w "\n%{http_code}\n" http://127.0.0.1:8080/dashboard
+curl -s -w "\n%{http_code}\n" http://127.0.0.1:8081/dashboard
 # → 404
-curl -s http://127.0.0.1:8080/
+curl -s http://127.0.0.1:8081/
 # → "No DashboardResult yet." のHTML
 ```
 
@@ -127,7 +129,7 @@ print(json.dumps(asdict(outcome.event_aggregate), default=_default))
 上記で得たJSONをそのまま `POST /aggregate` に送る。
 
 ```bash
-curl -s -X POST http://127.0.0.1:8080/aggregate \
+curl -s -X POST http://127.0.0.1:8081/aggregate \
   -H "Content-Type: application/json" \
   -d '<Step2で出力されたJSON>'
 ```
@@ -135,8 +137,8 @@ curl -s -X POST http://127.0.0.1:8080/aggregate \
 ## Step4 GET /dashboard・GET / で反映を確認
 
 ```bash
-curl -s http://127.0.0.1:8080/dashboard
-curl -s http://127.0.0.1:8080/    # ブラウザで開くと表形式で表示される
+curl -s http://127.0.0.1:8081/dashboard
+curl -s http://127.0.0.1:8081/    # ブラウザで開くと表形式で表示される
 ```
 
 ## Step2-3 の自動化 (scripts/post_dashboard_event.py)
@@ -207,7 +209,7 @@ python scripts/post_dashboard_event.py \
 
 Dashboard（本Runbookの対象、`api.dashboard_service` / `api.dashboard_view`）と TransportGateway（`runtime.transport_gateway`、Cloud Run Compatibility ShellのWebSocket層）は独立したサブシステムであり、`POST /aggregate` を介した手動投入以外の自動連携は無い（§2.3参照）。したがって WebSocket側で `1011`/`409` が発生しても、Dashboard自体のコード（本Runbookが対象とするコンポーネント）には影響しない — 直近に投入された `DashboardResult` を保持し続ける。
 
-WebSocket接続そのものの `1011`/`409` の原因調査・切り分けは `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §11（TransportGateway Session Lifecycle Verification）を参照。Operator E2E実施時は、WebSocket側でreconnectが発生した前後でもDashboardの表示内容（Trust Score等）が意図せず消失・巻き戻っていないことを確認する（同Runbook §11.7のチェック項目）。
+WebSocket接続そのものの `1011`/`409` の原因調査・切り分けは `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §10.6（`1011 keepalive timeout` → reconnect → `409`）を参照。Operator E2E実施時は、WebSocket側でreconnectが発生した前後でもDashboardの表示内容（Trust Score等）が意図せず消失・巻き戻っていないことを確認する（同Runbook §7 Dashboard確認の「重要」注記、および §9 合格条件 #12/#13）。
 
 ---
 
@@ -296,9 +298,9 @@ Conversation Traceabilityの情報は、Runtime Eventの `metadata`（`docs/H4_R
 # 9. Operational Checklist
 
 - [ ] `pip install uvicorn`
-- [ ] `python -m uvicorn api.api_server:app --host 127.0.0.1 --port 8080`
+- [ ] `python -m uvicorn api.api_server:app --host 127.0.0.1 --port 8081`
 - [ ] `GET /dashboard` → 404であることを確認
 - [ ] Step2-3の手順で `POST /aggregate` を実行
 - [ ] `GET /dashboard` → 200 + 内容確認
 - [ ] `GET /` をブラウザで開いて表示確認
-- [ ] （Operator E2E実施時）WebSocket側でreconnectが発生しても、直近のDashboard内容が意図せず消失・巻き戻らないことを確認（§7.4、`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §11.7）
+- [ ] （Operator E2E実施時）WebSocket側でreconnectが発生しても、直近のDashboard内容が意図せず消失・巻き戻らないことを確認（§7.4、`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §7 Dashboard確認の「重要」注記、§9 合格条件 #12/#13）

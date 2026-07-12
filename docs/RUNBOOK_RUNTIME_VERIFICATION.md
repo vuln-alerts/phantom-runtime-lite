@@ -1,9 +1,9 @@
 # Runbook — Runtime Verification (Verification Runtime / Trust Runtime / Dashboard / FastAPI)
 
-**Version:** 1.0
+**Version:** 1.1
 **Target Feature:** H4 Runtime Extension — Verification Runtime (`src/verification/`), Trust Runtime (`src/trust/`), Dashboard Runtime (`src/dashboard/`), Event Aggregator (`src/aggregator/`), FastAPI Presentation Layer (`src/api/`), Runtime Adapter (`src/runtime/event_adapter.py`)
 **Related:** `docs/RUNBOOK.md`（Cloud Run構築・デプロイ・運用手順）, `docs/RUNBOOK_PRODUCTION_VERIFICATION.md`（Runtime Client側のCalibration/WebSocket検証手順）, `docs/H4_RUNTIME_EVENT_CONTRACT.md`（Frozen）, `docs/H4_IMPLEMENTATION_PLAN.md`（Frozen）, `docs/H4_STATUS.md`, `docs/H4_10_VALIDATION_REPORT.md`
-**Last Updated:** 2026-07-11
+**Last Updated:** 2026-07-12（v1.1、`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` v2.0再構成に伴う章番号参照の是正。Release Candidate Review指摘）
 
 ---
 
@@ -126,7 +126,7 @@ pip install uvicorn
 
 ## 4.1 Runtime起動(Cloud Run Runtime / Runtime Client)
 
-本Runbookの対象外です。`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §5「Production Verification」の手順をそのまま使用します(重複記載しません)。Typed Eventは、Runtime起動後にCloud Run側の`_emit_event()`が発行するJSON行として観測できます。
+本Runbookの対象外です。`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §2「Runtime起動」〜§6「Operator E2E」の手順をそのまま使用します(重複記載しません)。Typed Eventは、Runtime起動後にCloud Run側の`_emit_event()`が発行するJSON行として観測できます。
 
 ## 4.2 Verification Runtime / Trust Runtime / Dashboard Runtime
 
@@ -173,11 +173,11 @@ curl -s http://127.0.0.1:8080/health
 
 ## Step1 Runtime起動
 
-本Runbookの対象外です。`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §5の手順でCloud Run Runtimeおよび Runtime Client を起動する。Startup CalibrationのSUCCESS、WebSocket接続成功を同Runbookの基準で確認する。
+本Runbookの対象外です。`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §2「Runtime起動」でCloud Run Runtimeを、§5「Runtime Client起動」でRuntime Clientを起動する。Startup CalibrationのSUCCESS(§5.3)、WebSocket接続成功を同Runbookの基準で確認する。
 
 ## Step2 WebSocket確認
 
-本Runbookの対象外です。`runtime/transport_gateway.py`が`phantom_runtime.py`の`_emit_event()`出力行を、接続中のRuntime ClientへWebSocket経由で verbatim(そのまま)中継していることを確認する。確認方法は`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §6.3(通常動作)と同一。
+本Runbookの対象外です。`runtime/transport_gateway.py`が`phantom_runtime.py`の`_emit_event()`出力行を、接続中のRuntime ClientへWebSocket経由で verbatim(そのまま)中継していることを確認する。確認方法は`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §6「Operator E2E」の実施中にRuntime Client画面へtranscript/replyが表示されることの確認と同一。
 
 ## Step3 Typed Event生成確認
 
@@ -359,7 +359,7 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://127.0.0.1:8080/aggregat
 
 **現象**: Runtime Client側でWebSocket接続は成功しているが、Cloud Run側の`_emit_event()`出力行が観測できない。
 
-**原因候補**: `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §9の各項目(固定Contamination Threshold・Cloud Run Cold Start・マイクデバイス未検出)を参照。
+**原因候補**: `docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §10.9(マイクデバイスが見つからない)・§10.10(Cloud Run Cold Start)を参照。(旧版で参照していた「固定Contamination Threshold」はAdaptive Runtime Calibration導入により現行のRunbookには存在しない)
 
 **重要な前提**: `runtime/transport_gateway.py`が中継するイベント行を自動的にVerification Runtime以降のパイプラインへ流し込む常駐コンシューマは存在しません(§2.3)。「Typed Eventは来ているのにVerification Runtimeまで届かない」という場合、コンシューマ側が実装されていないことが原因であり、Verification Runtime自体の不具合ではない可能性を最初に確認してください。
 
@@ -379,7 +379,7 @@ curl -s -w "\nHTTP_STATUS:%{http_code}\n" -X POST http://127.0.0.1:8080/aggregat
 
 ## 8.5 Cloud Runに接続できない
 
-本Runbookの対象外です。`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §9.2(Cloud Run Cold Start)、および`docs/RUNBOOK.md` §3-§9(Cloud Run構築・デプロイ)を参照。本Runbookのコンポーネント(Verification/Trust/Dashboard/FastAPI)自体はCloud Runへの接続を一切行わないため、この問題はCloud Run Runtime側(参照先2つのRunbookのスコープ)の切り分けが必要です。
+本Runbookの対象外です。`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §10.10(Cloud Run Cold Start)、および`docs/RUNBOOK.md` §3-§9(Cloud Run構築・デプロイ)を参照。本Runbookのコンポーネント(Verification/Trust/Dashboard/FastAPI)自体はCloud Runへの接続を一切行わないため、この問題はCloud Run Runtime側(参照先2つのRunbookのスコープ)の切り分けが必要です。
 
 ## 8.6 `/events` `/verification` `/trust` `/timeline` が404になる
 
