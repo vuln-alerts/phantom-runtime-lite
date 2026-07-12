@@ -25,8 +25,11 @@ gcloud run services describe phantom-runtime-lite \
   --region asia-northeast1 \
   --format="value(status.url)"
 
-curl -i <CLOUD_RUN_URL>/healthz
+curl -i <CLOUD_RUN_URL>/
 # 期待: HTTP/2 200 / ok
+# （Cloud Run公開URLではGoogle Frontendとの互換性のため "/" を使用する。"/healthz" は
+#   Google Frontend側の予約パスと衝突し404になる場合がある。詳細は
+#   docs/RUNBOOK_PRODUCTION_VERIFICATION.md §3を参照）
 ```
 
 ### 3.2 Runtime Client起動（OpenAI構成）

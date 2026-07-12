@@ -210,9 +210,11 @@ docker run --rm --name phantom-local -p 8080:8080 \
 ### 2. Health確認
 
 ```bash
-curl -i <CLOUD_RUN_URL>/healthz
+curl -i <CLOUD_RUN_URL>/
 # 期待: HTTP/2 200 / ok
 ```
+
+Cloud RunではGoogle Frontendとの互換性のため、公開URL（`<CLOUD_RUN_URL>`）に対するHealth Checkは `/` を使用する（`runtime.transport_gateway` の `HEALTH_PATHS` 上は `/healthz` と `/` は完全に同一実装だが、Cloud Runの公開URL上では `/healthz` がGoogle Frontend側の予約パスと衝突し404になる場合があるため）。ローカルDocker（`http://localhost:8080`）では従来どおり `/healthz` も利用できる（`docs/RUNBOOK_PRODUCTION_VERIFICATION.md` §3参照）。
 
 ### 3. Dashboard API起動
 

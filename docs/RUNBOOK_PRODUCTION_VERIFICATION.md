@@ -84,10 +84,10 @@ python -m runtime_client --list-devices
 ## 1.3 ネットワーク確認
 
 ```bash
-curl -i <CLOUD_RUN_URL>/healthz
+curl -i <CLOUD_RUN_URL>/
 ```
 
-詳細な期待結果は §3 Health Check を参照。
+Cloud Run公開URLでは `/healthz` ではなく `/` を使用する（理由は §3 Health Check を参照）。詳細な期待結果は §3 Health Check を参照。
 
 ---
 
@@ -157,8 +157,10 @@ readiness = healthy
 
 # 3. Health Check
 
+**Cloud Run公開URLでは `/` を使用する。** `runtime.transport_gateway` の `HEALTH_PATHS = ("/healthz", "/")` により実装上 `/healthz` と `/` は完全に同一（同じ readiness 判定、同じ 200/503 応答）だが、Cloud Runの公開URL（`*.run.app`）に対する外部リクエストでは、`/healthz` がGoogle Frontend側の予約パスと衝突し、コンテナに到達する前に404で応答が返る場合がある（`x-cloud-trace-context` ヘッダが付与されないことから、コンテナ未到達であることを実測で確認済み）。この事象はCloud Runを利用する他プロジェクトでも報告されている既知の挙動であり、本Runtimeの実装不備ではない。
+
 ```bash
-curl -i <CLOUD_RUN_URL>/healthz
+curl -i <CLOUD_RUN_URL>/
 ```
 
 期待
@@ -168,19 +170,20 @@ HTTP/2 200
 ok
 ```
 
-（ローカルDockerの場合は `curl -i http://localhost:8080/healthz` で同様に `HTTP/1.1 200 OK` / `ok`）
+（ローカルDockerの場合は、Google Frontendを経由しないため `/healthz` が引き続き利用できる: `curl -i http://localhost:8080/healthz` で同様に `HTTP/1.1 200 OK` / `ok`）
 
 異常時
 
 | Status | 原因 |
 |---|---|
-| 404 | URL誤り |
+| 404（`<CLOUD_RUN_URL>/` に対して） | URL誤り、またはサービス未デプロイ |
+| 404（`<CLOUD_RUN_URL>/healthz` に対して） | **URL誤りではない。** Cloud Run公開URL上でGoogle Frontendが `/healthz` を予約パスとして扱い、コンテナに到達させないことによる既知の挙動（上記参照）。`/` で再確認すること |
 | 503 | Runtime起動中、またはShutdown中 |
 
 ## 3.1 応答時間の継続監視（TransportGateway健全性）
 
 ```bash
-curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" <CLOUD_RUN_URL>/healthz
+curl -s -o /dev/null -w "%{http_code} %{time_total}s\n" <CLOUD_RUN_URL>/
 ```
 
 | 状態 | 期待応答時間 | 備考 |
