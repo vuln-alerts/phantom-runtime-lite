@@ -114,6 +114,25 @@ def block_rms(block: np.ndarray) -> float:
 _AUDIO_DEBUG_HEARTBEAT_SEC = 1.0
 
 
+# ---------------------------------------------------------------------------
+# Demo display-quality gate (Hackathon Release Candidate).
+#
+# [audio-debug] output above is independently gated by AUDIO_DEBUG=1 (or
+# the --audio-debug CLI flag, see config.py/main.py), separate from
+# PHANTOM_CALIBRATION_DEBUG/--production-verification. It previously piggy-
+# backed on debug_sink.is_enabled() (PHANTOM_CALIBRATION_DEBUG), so a plain
+# `--production-verification` run -- e.g. the demo recording command in
+# docs/DEMO.md -- printed continuous RMS/Gate/Speech spam. Decoupling it
+# means normal runs never show [audio-debug] unless explicitly requested,
+# without touching what --production-verification itself still does
+# (calibration-debug lines, session log tee, root_cause_summary.txt).
+# Purely a print/tee gate: does not affect the Speech Gate decision or any
+# other Runtime/VAD/Provider/Verification/Trust/Dashboard behavior.
+# ---------------------------------------------------------------------------
+def _audio_debug_enabled() -> bool:
+    return os.getenv("AUDIO_DEBUG") == "1"
+
+
 def _audio_debug_print(text: str) -> None:
     print(text, flush=True)
     debug_sink.write(text)
@@ -246,11 +265,11 @@ class AudioBridge:
                 # (TEMPORARY) -- see _speech_gate_disabled()'s module-level
                 # note. Every block that reaches this branch is forwarded
                 # unconditionally; the Speech Gate is not consulted at all.
-                if debug_sink.is_enabled():
+                if _audio_debug_enabled():
                     self._log_speech_gate_disabled_debug(rms)
             else:
                 gate = self._current_speech_gate()
-                if debug_sink.is_enabled():
+                if _audio_debug_enabled():
                     self._log_speech_gate_debug(rms, gate)
                 if rms < gate:
                     continue  # silence -- never forwarded, so the Server's

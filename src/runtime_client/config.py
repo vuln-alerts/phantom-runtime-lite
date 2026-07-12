@@ -60,6 +60,14 @@ class ClientConfig:
     # to False, at the end of the dataclass, so it is purely additive --
     # every existing ClientConfig(...) construction keeps working.
     production_verification: bool = False
+    # Demo display-quality gate (Hackathon Release Candidate). Independent
+    # of production_verification above: only controls whether
+    # runtime_client/audio_bridge.py's [audio-debug] RMS/Gate/Speech lines
+    # print. Defaulted to False so normal runs (incl. demo recordings)
+    # stay quiet; pass --audio-debug or set AUDIO_DEBUG=1 to opt in. Does
+    # not touch the Speech Gate decision, VAD, Provider, Verification,
+    # Trust, or Dashboard.
+    audio_debug: bool = False
 
 
 def build_ws_url(url: str, provider: str) -> str:
@@ -104,6 +112,16 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
             "finishes. Normal startup/behavior is otherwise unchanged."
         ),
     )
+    parser.add_argument(
+        "--audio-debug",
+        action="store_true",
+        help=(
+            "Print runtime_client/audio_bridge.py's [audio-debug] RMS/Gate/"
+            "Speech lines (equivalent to setting AUDIO_DEBUG=1). Off by "
+            "default so normal runs/demo recordings stay quiet; does not "
+            "affect the Speech Gate decision itself."
+        ),
+    )
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--block-size", type=int, default=DEFAULT_BLOCK_SIZE, help="Frames per audio block sent per WebSocket message")
     parser.add_argument("--max-reconnect-attempts", type=int, default=DEFAULT_MAX_RECONNECT_ATTEMPTS)
@@ -143,4 +161,5 @@ def parse_args(argv: Optional[list] = None) -> ClientConfig:
         list_devices=args.list_devices,
         list_output_devices=args.list_output_devices,
         production_verification=args.production_verification,
+        audio_debug=args.audio_debug,
     )

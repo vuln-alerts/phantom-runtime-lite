@@ -682,6 +682,14 @@ def main(argv: Optional[list] = None) -> None:
         debug_sink.open_session_log(log_path)
         _print(f"[runtime_client] Production Verification mode: debug log -> {log_path}")
 
+    # Demo display-quality gate (Hackathon Release Candidate): --audio-debug
+    # is the one-flag equivalent of setting AUDIO_DEBUG=1 by hand. Independent
+    # of --production-verification above -- only controls whether
+    # audio_bridge.py's [audio-debug] RMS/Gate/Speech lines print; off by
+    # default so normal runs (incl. demo recordings) stay quiet.
+    if config.audio_debug:
+        os.environ["AUDIO_DEBUG"] = "1"
+
     if config.list_devices:
         _print("[runtime_client] available input devices:")
         _list_input_devices()
